@@ -1,0 +1,21 @@
+.local/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+
+# Personal prompts, legacy native app and local artifacts
+/filter-prompt.txt
+/ios/
+.env.*
+*.sqlite*
+*.db
+*.log
+*.pem
+*.key
+*.p12
+*.mobileprovision
+GoogleService-Info.plist
+client_secret*.json
+credentials*.json
+**/xcuserdata/
