@@ -163,6 +163,19 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(message['decision'],'hide');self.assertEqual(message['confidence'],.02)
         self.s.reset_filter()
         self.assertNotIn('confidence',self.s.snapshot()['messages'][0])
+    def test_search_includes_archived_and_does_not_pollute_cache(self):
+        message=EmailMessage();message['From']='Sender <sender@example.com>';message['Subject']='Archived result';message.set_content('Searchable body')
+        raw=resource(message,id='archived',labels=['UNREAD'])
+        def gmail(path,params):
+            if path=='messages':
+                self.assertEqual(params,{'q':'subject:result','maxResults':25,'pageToken':'page2'})
+                return {'messages':[{'id':'archived'}],'nextPageToken':'page3'}
+            return raw
+        with patch.object(self.s,'gmail',side_effect=gmail):result=self.s.search('subject:result','page2')
+        self.assertEqual(result['nextPage'],'page3');self.assertEqual(result['messages'][0]['id'],'archived')
+        self.assertEqual([m['id'] for m,a,d,c in self.s.store.rows()],['a'])
+        detail=self.s.read('archived');self.assertFalse(detail['unread']);self.assertIn('Searchable body',detail['body'])
+        with self.assertRaises(ServiceError):self.s.search(' ')
     def test_manual_keep_is_retained_even_after_uncheck(self):
         self.s.set_expected('a', True)
         self.s.set_expected('a', False)

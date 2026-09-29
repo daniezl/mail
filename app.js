@@ -4,6 +4,8 @@ const el = (tag, className, text) => {const n=document.createElement(tag); if(cl
 let state={messages:[],account:null,busy:false}, csrf='', selected=null, requestRunning=false, readerRun=0, retry=null;
 let filterAction=false, promptLoaded=false;
 const pendingLabels=new Map();
+const copiedCodes=new Set();
+const copyTimers=new Map();
 let hoveredRow=null, keyboardNavigation=false;
 function clearMailHover(){hoveredRow?.classList.remove('pointer-hover');hoveredRow=null;}
 document.addEventListener('pointermove',e=>{
@@ -19,9 +21,10 @@ document.addEventListener('scroll',clearMailHover,true);
 window.addEventListener('blur',clearMailHover);
 document.addEventListener('visibilitychange',clearMailHover);
 
+let searchActive=false, searchMessages=[], searchQuery='', searchNext=null, searchBusy=false, searchError='', searchRun=0, inboxScroll=0;
 let showFiltered=true;
 try{showFiltered=localStorage.getItem('mail-show-filtered')!=='false';}catch{}
-function visibleMessages(){return state.messages.filter(m=>showFiltered || (pendingLabels.has(m.id)?pendingLabels.get(m.id):m.expectedKeep) || m.decision!=='hide');}
+function visibleMessages(){if(searchActive)return searchMessages;return state.messages.filter(m=>showFiltered || (pendingLabels.has(m.id)?pendingLabels.get(m.id):m.expectedKeep) || m.decision!=='hide');}
 $('#show-filtered').checked=showFiltered;
 $('#show-filtered').onchange=()=>{showFiltered=$('#show-filtered').checked;try{localStorage.setItem('mail-show-filtered',String(showFiltered));}catch{}render();};
 function notice(text, action=null){$('#notice-text').textContent=text;$('#notice').hidden=!text;$('#retry').hidden=!action;retry=action;}
@@ -39,6 +42,22 @@ function row(m){
   meta.append(accent,el('span','sender',m.sender));
   const subject=el('span','subject',m.subject);subject.title=m.subject;
   button.append(meta,subject,time,el('span','unread-dot'));button.onclick=()=>openMessage(m.id);
+  const main=el('div','mail-main');main.append(button);
+  if(m.otp?.code && /^\d{4,8}$/.test(m.otp.code)){
+    main.classList.add('has-code');
+    const copy=el('button','code-copy');copy.type='button';copy.title='Copy verification code';copy.setAttribute('aria-label','Copy verification code');
+    copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>';
+    if(copiedCodes.has(m.id)){copy.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';copy.title='Copied';copy.setAttribute('aria-label','Copied');}
+    copy.onclick=async event=>{
+      event.stopPropagation();
+      try{await navigator.clipboard.writeText(m.otp.code);}catch{notice('Could not copy. Please try again.');return;}
+      copiedCodes.add(m.id);clearTimeout(copyTimers.get(m.id));
+      copyTimers.set(m.id,setTimeout(()=>{copiedCodes.delete(m.id);copyTimers.delete(m.id);render();},2000));
+      render();await markCopiedRead(m.id);
+    };
+    main.append(copy);
+  }
+  if(searchActive){wrap.append(main);return wrap;}
   const check=el('input','expected-keep');check.type='checkbox';check.checked=pendingLabels.has(m.id)?pendingLabels.get(m.id):m.expectedKeep;
   check.setAttribute('aria-label','Keep '+m.sender+': '+m.subject);check.title='Expected to keep';check.disabled=pendingLabels.has(m.id);
   check.onchange=()=>saveExpected(m.id,check.checked);
@@ -46,7 +65,7 @@ function row(m){
   const result=el('span','filter-result'+(correct?' correct':''),{keep:'✓',uncertain:'−',hide:'×'}[m.decision] || '');
   const label={keep:'Keep',uncertain:'Uncertain',hide:'Hide'}[m.decision] || 'Not evaluated';
   result.setAttribute('aria-label',label+(correct?' — correct':''));result.title=label+(correct?' — correct':'')+(m.confidence===undefined?'':` | Confidence: ${(m.confidence*100).toFixed(1)}% | P(keep): ${(m.probabilities.keep*100).toFixed(1)}%`);
-  wrap.append(result,check,button);return wrap;
+  wrap.append(result,check,main);return wrap;
 }
 function renderRows(){
   const messages=visibleMessages(), list=$('#mail-list'), wanted=new Set(messages.map(m=>m.id));
@@ -67,41 +86,69 @@ function render(){
   $('#login').hidden=!!state.account;$('#workspace').hidden=!state.account;
   $('#connection-state').textContent=state.busy?(state.classifying?(state.progress?`Filtering ${state.progress.done} / ${state.progress.total}…`:'Filtering…'):''):'';
   renderRows();
-  $('#reset-filter').hidden=!state.account || !state.filterEnabled;
-  $('#run-filter').hidden=!state.account;
-  $('#filtered-toggle').hidden=!state.account;
+  $('#search-toggle').hidden=!state.account;
+  $('#search-form').hidden=!searchActive;
+  $('#prompt-editor').hidden=searchActive;
+  $('#search-status').hidden=!searchActive;
+  $('#search-status').textContent=searchBusy?'Searching…':searchError || (searchQuery?`${searchMessages.length} results`:'');
+  $('#search-more').hidden=!searchActive || !searchNext;$('#search-more').disabled=searchBusy;
+  $('#reset-filter').hidden=searchActive || !state.account || !state.filterEnabled;
+  $('#run-filter').hidden=searchActive || !state.account;
+  $('#filtered-toggle').hidden=searchActive || !state.account;
   if(!promptLoaded && state.prompt!==undefined){$('#filter-prompt').value=state.prompt;promptLoaded=true;}
-  $('#filter-score').hidden=!state.account;
+  $('#filter-score').hidden=searchActive || !state.account;
   const score=state.score;
   $('#filter-score').textContent=score?.evaluated?`${score.correct} / ${score.total} correct`:'—';
   $('#filter-score').title=score?`${score.evaluated} / ${score.total} evaluated; uncertain counts as incorrect`:'';
   $('#reset-filter').disabled=filterAction;$('#run-filter').disabled=filterAction || state.busy || pendingLabels.size>0;
   if(focused && keyboardNavigation){const b=[...document.querySelectorAll('.mail-item')].find(b=>b.dataset.id===focused);b?.focus({preventScroll:true});}
-  $('#empty').hidden=visibleMessages().length>0 || state.busy;
-  $('#empty').textContent=state.error?'Mail is temporarily unavailable':'No mail yet';
+  $('#empty').hidden=visibleMessages().length>0 || (searchActive?searchBusy || !searchQuery || !!searchError:state.busy);
+  $('#empty').textContent=searchActive?'No results':state.error?'Mail is temporarily unavailable':'No mail yet';
   if(state.error)notice(state.error,state.needsLogin?connect:()=>sync(false,true));else if(!requestRunning)notice('');
   if(selected && !visibleMessages().some(m=>m.id===selected))closeReader();
+}
+async function markCopiedRead(id){
+  try{
+    await api('read',{id});
+    for(const m of [...state.messages,...searchMessages])if(m.id===id)m.unread=false;
+    render();
+  }catch{notice('Copied, but could not mark as read.',()=>markCopiedRead(id));}
 }
 async function openMessage(id){
   clearMailHover();
   const run=++readerRun;selected=id;document.body.classList.add('reading');$('#message').hidden=false;
-  const m=state.messages.find(m=>m.id===id);if(!m)return;
+  const m=visibleMessages().find(m=>m.id===id);if(!m)return;
   $('#reader-sender').textContent=m.sender;$('#reader-accent').style.setProperty('--source',m.color);$('#reader-subject').textContent=m.subject;
   $('#reader-time').textContent=dateText(m,true);$('#reader-address').textContent=`${m.email}\nTo ${m.mailbox || 'Unknown'}`;
   $('#reader-body').textContent='';$('#attachments').replaceChildren();$('#reader').scrollTop=0;render();
   try{
     const detail=await api('read',{id});if(run!==readerRun)return;
-    m.unread=false;render();
+    m.unread=false;const cached=state.messages.find(item=>item.id===id);if(cached)cached.unread=false;render();
     if(detail.html){
       const frame=el('iframe','mail-html');frame.title='Email content';frame.setAttribute('sandbox','allow-popups allow-popups-to-escape-sandbox');frame.referrerPolicy='no-referrer';
       frame.srcdoc=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>body{font:20px/1.6 -apple-system,sans-serif;margin:12px;overflow-wrap:anywhere;color:#292a28;background:#fff}img,table{max-width:100%}pre{white-space:pre-wrap}a{color:#4175bb}</style>${detail.html}`;
       $('#reader-body').replaceChildren(frame);
     }else $('#reader-body').textContent=detail.body;
     for(const a of detail.attachments || []){const link=el('a','attachment',a.name);link.href='/api/attachment?id='+encodeURIComponent(id)+'&part='+encodeURIComponent(a.id);link.download=a.name;$('#attachments').append(link);}
-  }catch(e){notice(e.message,()=>openMessage(id));}
+  }catch(e){if(run===readerRun)notice(e.message,()=>openMessage(id));}
 }
 function closeReader(){clearMailHover();const previous=selected;++readerRun;selected=null;document.body.classList.remove('reading');$('#message').hidden=true;document.querySelectorAll('.mail-row.selected').forEach(n=>n.classList.remove('selected'));document.querySelectorAll('.mail-item[aria-pressed=true]').forEach(n=>n.setAttribute('aria-pressed','false'));if(keyboardNavigation)[...document.querySelectorAll('.mail-item')].find(n=>n.dataset.id===previous)?.focus({preventScroll:true});}
-$('#back').onclick=closeReader;document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReader();});
+$('#back').onclick=closeReader;document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(selected)closeReader();else if(searchActive)closeSearch();}});
+function closeSearch(){++searchRun;searchActive=false;searchBusy=false;searchError='';closeReader();render();$('.inbox').scrollTop=inboxScroll;$('#search-toggle').focus();}
+$('#search-toggle').onclick=()=>{closeReader();if(!searchActive)inboxScroll=$('.inbox').scrollTop;searchActive=true;render();$('.inbox').scrollTop=0;$('#search-query').focus();};
+$('#search-close').onclick=closeSearch;
+$('#search-form').onsubmit=e=>{e.preventDefault();runSearch();};
+$('#search-more').onclick=()=>runSearch(true);
+async function runSearch(more=false){
+  const query=more?searchQuery:$('#search-query').value.trim();if(!query)return;
+  const run=++searchRun;const page=more?searchNext:null;
+  if(!more){searchMessages=[];searchNext=null;}searchQuery=query;searchBusy=true;searchError='';render();
+  try{
+    const value=await api('search',{query,page});if(run!==searchRun || !searchActive)return;
+    searchMessages=[...new Map([...searchMessages,...value.messages].map(m=>[m.id,m])).values()];searchNext=value.nextPage;
+  }catch(e){if(run===searchRun)searchError=e.message;}
+  finally{if(run===searchRun){searchBusy=false;render();}}
+}
 async function connect(){
   $('#connect').disabled=true;
   try{const r=await api('connect',{});location.assign(r.url);}catch(e){notice(e.message,connect);$('#connect').disabled=false;}

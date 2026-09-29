@@ -11,6 +11,7 @@
 </head>
 <body>
   <svg class="symbols" aria-hidden="true"><defs>
+    <symbol id="search-icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
     <symbol id="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
     <symbol id="moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z"/></symbol>
     <symbol id="system" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/></symbol>
@@ -20,15 +21,17 @@
   <header class="topbar">
     <span class="connection-state" id="connection-state" role="status"></span>
     <div class="header-actions"><label id="filtered-toggle" class="filtered-toggle" hidden><input id="show-filtered" type="checkbox" role="switch" checked>Show filtered</label><button id="reset-filter" class="filter-button" hidden>Reset filter</button><button id="run-filter" class="filter-button" hidden>Run filter</button><span id="filter-score" role="status" hidden></span>
-    <button id="appearance" class="icon-button" aria-label="Appearance: System" title="Appearance: System"><svg><use href="#system"/></svg></button></div>
+    <button id="appearance" class="icon-button" aria-label="Appearance: System" title="Appearance: System"><svg><use href="#system"/></svg></button><button id="search-toggle" class="icon-button" aria-label="Search mail" hidden><svg><use href="#search-icon"/></svg></button></div>
   </header>
   <main id="login" hidden><button id="connect" class="connect-button">Connect Gmail <span aria-hidden="true">↗</span></button></main>
   <main id="workspace" hidden>
     <section class="inbox" aria-label="Mail">
       <div class="inbox-content">
+      <form id="search-form" hidden><input id="search-query" type="search" aria-label="Search Gmail" placeholder="Search Gmail" maxlength="1000" autocomplete="off"><button class="filter-button" type="submit">Search</button><button id="search-close" class="icon-button" type="button" aria-label="Close search">×</button></form><div id="search-status" role="status" hidden></div>
       <details id="prompt-editor"><summary>Prompt</summary><textarea id="filter-prompt" aria-label="Filter prompt" maxlength="20000" spellcheck="false"></textarea></details>
       <div id="mail-list" role="list"></div>
       <div id="empty" class="empty" hidden>No mail yet</div>
+      <button id="search-more" class="filter-button" hidden>Load more</button>
       <div id="page-end" aria-hidden="true"></div>
       </div>
     </section>

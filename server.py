@@ -59,10 +59,10 @@ class Handler(BaseHTTPRequestHandler):
             self.guard()
             if path == '/api/state': return self.send(200, {**SERVICE.snapshot(), 'csrf': CSRF})
             if path == '/api/message':
-                m = SERVICE.store.message(query.get('id', [''])[0])
+                m = SERVICE.cached_message(query.get('id', [''])[0])
                 return self.send(200, SERVICE.public(m, detail=True))
             if path == '/api/attachment':
-                m = SERVICE.store.message(query.get('id', [''])[0]); i = query.get('part', [''])[0]
+                m = SERVICE.cached_message(query.get('id', [''])[0]); i = query.get('part', [''])[0]
                 a = next((a for a in m['attachments'] if a['id'] == i), None)
                 if not a: raise ServiceError('Attachment unavailable.', 404)
                 return self.send(200, base64.b64decode(a['data']), 'application/octet-stream', {'Content-Disposition': "attachment; filename*=UTF-8''" + quote(Path(a['name']).name, safe='')})
@@ -104,6 +104,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/filter/reset': return self.send(200, SERVICE.reset_filter())
             if path == '/api/filter/run': return self.send(200, SERVICE.run_filter(data.get('prompt')))
             if path == '/api/filter/expected': return self.send(200, SERVICE.set_expected(data.get('id', ''), data.get('keep')))
+            if path == '/api/search': return self.send(200, SERVICE.search(data.get('query'), data.get('page')))
             if path == '/api/read': return self.send(200, SERVICE.read(data.get('id', '')))
             raise ServiceError('Not found.', 404)
         except (ValueError, TypeError): self.send(400, {'error': 'Invalid request.'})

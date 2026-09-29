@@ -27,7 +27,7 @@ Filtering changes what you see in Mail. It does not archive, delete, or relabel 
 - **Persistent local cache.** Keep the latest 100 inbox messages, plus messages ever marked keep manually or by AI. Those retained copies survive filter resets and reclassification.
 - **Offline reading.** Read cached messages without an internet connection while the local server is running.
 
-Mail currently focuses on reading and filtering. Sending, replying, search, and background push notifications are not implemented.
+Mail currently focuses on reading and filtering. Sending, replying, and background push notifications are not implemented.
 
 ## Get started
 
@@ -91,6 +91,10 @@ python3 server.py
 Open [127.0.0.1:5173](http://127.0.0.1:5173/) and click **Connect Gmail**. Keep the terminal open while using Mail; press **Ctrl+C** to stop the server.
 
 Mail syncs on startup, when you return to the page, and every 30 seconds while the page is visible.
+
+## Search
+
+Click the search icon, enter a query, and press Enter. Search queries Gmail directly, including archived mail and messages hidden by the AI filter. Gmail operators such as `from:` and `subject:` work too. Use **Load more** for additional results. Reading and returning preserves your search; Escape closes the reader first, then search. Search requires a connection and uses temporary memory without changing the inbox cache or classification labels.
 
 ## Tune the filter
 

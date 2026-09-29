@@ -137,6 +137,7 @@ class MailService:
         self.filter_lock = threading.RLock()
         self.generation = 0
         self.rerun_requested = False
+        self.search_cache = {}
         self.trim_cache()
         signature = 'jev:' + private_config(directory)['model'] + ':' + str(PROMPT_VERSION)
         if self.store.get('classifier_signature') != signature:
@@ -247,6 +248,7 @@ class MailService:
             colors[mailbox] = ['#569078', '#bc806b', '#a38d56', '#718aad', '#9883a7'][len(colors) % 5]
             self.store.set('colors', colors)
         result['color'] = colors.get(mailbox, '#959995')
+        result['otp'] = message.get('otp')
         if detail:
             result['body'] = message['body']; result['html'] = message['html']
             result['attachments'] = [{k: v for k, v in a.items() if k != 'data'} for a in message.get('attachments', [])]
@@ -262,8 +264,32 @@ class MailService:
         return {**self.status(), 'prompt': filter_prompt(),
                 'score': {'correct': correct, 'evaluated': len(evaluated), 'total': len(rows)}, 'messages': [{**self.public(m), 'decision': d} for m, a, d, c in rows
                  if 'INBOX' in m['labels']]}
+    def cached_message(self, id):
+        try: return self.store.message(id)
+        except ServiceError:
+            with self.sync_lock:
+                if id in self.search_cache: return self.search_cache[id]
+            raise
+    def search(self, query, page=None):
+        if not isinstance(query, str) or not query.strip() or len(query) > 1000:
+            raise ServiceError('Enter a search query (up to 1,000 characters).')
+        if page is not None and (not isinstance(page, str) or len(page) > 2000):
+            raise ServiceError('Invalid search page.')
+        params = {'q': query.strip(), 'maxResults': 25}
+        if page: params['pageToken'] = page
+        listing = self.gmail('messages', params)
+        def fetch(item):
+            return parse_message(self.gmail('messages/' + quote(item['id'], safe=''), {'format':'raw'}), self.store.get('account', ''))
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            messages = list(pool.map(fetch, listing.get('messages', [])))
+        with self.sync_lock:
+            for m in messages:
+                self.search_cache.pop(m['id'], None)
+                self.search_cache[m['id']] = m
+            while len(self.search_cache) > 500: self.search_cache.pop(next(iter(self.search_cache)))
+        return {'messages':[self.public(m) for m in messages], 'nextPage':listing.get('nextPageToken')}
     def read(self, id):
-        m = self.store.message(id)
+        m = self.cached_message(id)
         self.store.set('read:' + id, True)
         return self.public(m, detail=True)
     def content_key(self, m, prompt=None, model=None):
