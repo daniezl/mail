@@ -36,8 +36,8 @@
       </div>
     </section>
     <section id="reader" class="reader" aria-label="Read email">
-      <article id="message" hidden>
         <div class="reader-toolbar"><button id="back" class="icon-button" aria-label="Back to mail"><svg><use href="#icon-back"/></svg></button></div>
+      <article id="message" hidden>
         <div class="message-meta"><span id="reader-accent" class="accent"></span><span id="reader-sender"></span><time id="reader-time"></time></div>
         <h1 id="reader-subject"></h1>
         <div id="reader-address" class="reader-address"></div>
@@ -47,5 +47,6 @@
     </section>
   </main>
   <div id="notice" role="status" hidden><span id="notice-text"></span><button id="retry">Retry</button></div>
+<dialog id="attachment-viewer" aria-label="Attachment preview"><div class="preview-toolbar"><span id="preview-name"></span><a id="preview-download" class="filter-button">Download</a><button id="preview-close" class="icon-button" aria-label="Close preview">×</button></div><div id="preview-content"></div><div id="preview-pages" hidden><button id="preview-prev" class="icon-button" aria-label="Previous page">←</button><span id="preview-page"></span><button id="preview-next" class="icon-button" aria-label="Next page">→</button></div></dialog>
 </body>
 </html>

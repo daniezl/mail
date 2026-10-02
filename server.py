@@ -11,6 +11,7 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit, quote
 from webmail.service import MailService, ServiceError, SCOPE
+from webmail.attachments import preview_kind, pdf_page
 
 ROOT = Path(__file__).resolve().parent
 PORT = int(os.environ.get('MAIL_PORT', '5173'))
@@ -38,7 +39,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
         self.send_header('X-Frame-Options', 'DENY')
-        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src 'self' about:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'self' about:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         for k, v in (headers or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(data)
     def redirect(self, url): self.send(303, b'', headers={'Location': url})
@@ -61,10 +62,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/message':
                 m = SERVICE.cached_message(query.get('id', [''])[0])
                 return self.send(200, SERVICE.public(m, detail=True))
-            if path == '/api/attachment':
+            if path in ('/api/attachment', '/api/attachment-preview'):
                 m = SERVICE.cached_message(query.get('id', [''])[0]); i = query.get('part', [''])[0]
                 a = next((a for a in m['attachments'] if a['id'] == i), None)
                 if not a: raise ServiceError('Attachment unavailable.', 404)
+                if path == '/api/attachment-preview':
+                    data = base64.b64decode(a['data'])
+                    if preview_kind(a) == 'image': return self.send(200, data, a['mime'])
+                    if preview_kind(a) == 'pdf':
+                        try: image, pages = pdf_page(data, int(query.get('page', ['0'])[0]))
+                        except Exception: raise ServiceError('Preview unavailable. You can still download this file.', 422)
+                        return self.send(200, image, 'image/png', {'X-Page-Count':str(pages)})
+                    raise ServiceError('No preview for this file type.', 415)
                 return self.send(200, base64.b64decode(a['data']), 'application/octet-stream', {'Content-Disposition': "attachment; filename*=UTF-8''" + quote(Path(a['name']).name, safe='')})
             if path == '/auth/callback':
                 state = query.get('state', [''])[0]; entry = STATES.pop(state, None)
@@ -105,6 +114,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/filter/run': return self.send(200, SERVICE.run_filter(data.get('prompt')))
             if path == '/api/filter/expected': return self.send(200, SERVICE.set_expected(data.get('id', ''), data.get('keep')))
             if path == '/api/search': return self.send(200, SERVICE.search(data.get('query'), data.get('page')))
+            if path == '/api/replies': return self.send(200, SERVICE.followups(data.get('id', '')))
             if path == '/api/read': return self.send(200, SERVICE.read(data.get('id', '')))
             raise ServiceError('Not found.', 404)
         except (ValueError, TypeError): self.send(400, {'error': 'Invalid request.'})

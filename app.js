@@ -114,26 +114,138 @@ async function markCopiedRead(id){
     render();
   }catch{notice('Copied, but could not mark as read.',()=>markCopiedRead(id));}
 }
+function partTime(sent){
+  return (sent || '').replace(/^[A-Za-z]+,\s*/,'').replace(/\s*\(UTC.*$/,'').replace(/\s+at\s+/,' ').replace(/(\d{1,2}:\d{2}):\d{2}/,'$1').replace(/\b(January|February|March|April|June|July|August|September|October|November|December)\b/g,m=>m.slice(0,3));
+}
+function updateReaderTheme(){
+  const style=getComputedStyle(document.documentElement);
+  for(const frame of document.querySelectorAll('.conversation-html')){
+    const root=frame.contentDocument?.documentElement;if(!root)continue;
+    for(const name of ['bg','ink','blue'])root.style.setProperty('--mail-'+name,style.getPropertyValue(name==='bg' && frame.closest('.quoted-message')?'--sidebar':'--'+name));
+  }
+}
+function mailContent(part){
+  const content=el('div','part-content');
+  if(!part.html){content.textContent=part.body || '';return content;}
+  const frame=el('iframe','mail-html conversation-html');frame.title='Email content';
+  // Scripts and forms remain forbidden. Same-origin lets the parent size this
+  // sanitized document without injecting or enabling any email scripts.
+  frame.setAttribute('sandbox','allow-same-origin allow-popups allow-popups-to-escape-sandbox');frame.referrerPolicy='no-referrer';
+  frame.onload=()=>{
+    const doc=frame.contentDocument;if(!doc)return;
+    updateReaderTheme();
+    const resize=()=>{if(frame.isConnected)frame.style.height=Math.max(60,doc.documentElement.scrollHeight,doc.body.scrollHeight)+'px';};
+    resize();const observer=new ResizeObserver(resize);observer.observe(doc.body);
+    frame._cleanup=()=>observer.disconnect();
+    for(const img of doc.images)img.addEventListener('load',resize,{once:true});
+  };
+  const style=getComputedStyle(document.documentElement);
+  const ink=style.getPropertyValue('--ink').trim(),bg=style.getPropertyValue('--bg').trim(),blue=style.getPropertyValue('--blue').trim();
+  frame.srcdoc=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>html,body{margin:0;padding:0;background:var(--mail-bg,${bg});color:var(--mail-ink,${ink});font:20px/1.65 -apple-system,sans-serif;overflow-wrap:anywhere}body{display:flow-root}body *{max-width:100%;box-sizing:border-box}p,div,span,font,td,li{color:inherit!important;background-color:transparent!important;font-family:inherit!important;font-size:inherit!important}img{height:auto}table{max-width:100%}pre{white-space:pre-wrap}a{color:var(--mail-blue,${blue})!important}hr{border:0;border-top:1px solid ${ink}22}blockquote{margin:0}p:empty,div:empty{display:none}</style>${part.html}`;
+  content.append(frame);return content;
+}
+function addressLines(from,to){
+  const addresses=value=>[...new Set(String(value || '').match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?/gi) || [])];
+  const recipients=addresses(to);
+  const own=new Set([state.account,...(state.ownAddresses || [])].filter(Boolean).map(a=>a.toLowerCase()));
+  const mine=recipients.filter(a=>own.has(a.toLowerCase()));
+  return `From: ${addresses(from).join(', ') || 'Unknown'}\nTo: ${(mine.length?mine:recipients).join(', ') || 'Unknown'}`;
+}
+function renderConversation(detail,followupsOnly=false){
+  const root=$('#reader-body');if(!followupsOnly)root.replaceChildren();
+  const parts=detail.conversation?.length?detail.conversation:[detail];
+  const history=parts.slice(1).reverse();
+  for(const part of (followupsOnly?detail.replies:[...history,parts[0]])){
+    const isCurrent=!followupsOnly && part===parts[0];
+    const quote=el('details','quoted-message'),summary=el('summary','quote-summary');
+    summary.append(el('span','quote-sender',part.sender || (isCurrent?detail.sender:'Previous message')),el('time','quote-time',partTime(part.sent)));
+    summary.title=part.attribution || [part.email,part.subject].filter(Boolean).join(' · ');
+    quote.append(summary);
+    const expand=()=>{
+      if(quote.open && !quote.querySelector('.part-content')){
+        quote.append(el('div','quote-address',addressLines(part.email,part.to)));
+        quote.append(mailContent(part));
+      }
+    };
+    quote.addEventListener('toggle',expand);
+    root.append(quote);
+    if(isCurrent){quote.open=true;expand();}
+  }
+  if(followupsOnly)return;
+  const current=parts[0];
+  $('#reader-address').textContent=addressLines(detail.email,current.to || detail.mailbox);
+}
+const attachmentURLs=new Set();let attachmentGeneration=0,previewRun=0,previewFile=null,previewPage=0,previewPages=1,modalURL=null;
+function attachmentURL(id,a,preview=false,page=0){return '/api/attachment'+(preview?'-preview':'')+'?id='+encodeURIComponent(id)+'&part='+encodeURIComponent(a.id)+(preview?'&page='+page:'');}
+function clearAttachmentPreviews(){++attachmentGeneration;$('#attachment-viewer').close();for(const url of attachmentURLs)URL.revokeObjectURL(url);attachmentURLs.clear();}
+function fileSize(bytes){return bytes>=1048576?(bytes/1048576).toFixed(1)+' MB':Math.max(1,Math.round(bytes/1024))+' KB';}
+async function loadAttachmentPreview(id,a,page){
+  const response=await fetch(attachmentURL(id,a,true,page));
+  if(!response.ok)throw new Error('Preview unavailable');
+  const blob=await response.blob();const url=URL.createObjectURL(blob);attachmentURLs.add(url);
+  return {url,pages:Number(response.headers.get('X-Page-Count')) || 1};
+}
+function renderAttachments(id,attachments){
+  const generation=attachmentGeneration;
+  for(const a of attachments.filter(a=>!a.inline)){
+    const card=el('button','attachment-card');card.type='button';card.setAttribute('aria-label','Preview '+a.name);
+    const surface=el('div','attachment-surface'+(a.preview==='pdf'?' pdf-preview':'')),footer=el('div','attachment-footer');
+    surface.append(el('span','attachment-placeholder',a.preview?'Loading preview…':a.name.split('.').pop().toUpperCase().slice(0,10)));
+    footer.append(el('span','attachment-name',a.name),el('span','attachment-size',fileSize(a.size || 0)));card.append(surface,footer);
+    card.onclick=()=>openAttachment(id,a);$('#attachments').append(card);
+    if(a.preview)loadAttachmentPreview(id,a,0).then(({url})=>{
+      if(generation!==attachmentGeneration){URL.revokeObjectURL(url);attachmentURLs.delete(url);return;}
+      const img=el('img');img.alt=a.name;img.src=url;surface.replaceChildren(img);
+    }).catch(()=>{if(generation===attachmentGeneration)surface.textContent='Preview unavailable';});
+  }
+}
+async function openAttachment(id,a){
+  previewFile={id,a};previewPage=0;previewPages=1;$('#preview-name').textContent=a.name;
+  $('#preview-download').href=attachmentURL(id,a);$('#preview-download').download=a.name;
+  if(!$('#attachment-viewer').open)$('#attachment-viewer').showModal();await showAttachmentPage();
+}
+async function showAttachmentPage(){
+  const run=++previewRun;const {id,a}=previewFile;
+  $('#preview-content').textContent=a.preview?'Loading preview…':'Preview is not available for this file type.';$('#preview-pages').hidden=true;
+  if(modalURL){URL.revokeObjectURL(modalURL);attachmentURLs.delete(modalURL);modalURL=null;}
+  if(!a.preview)return;
+  try{
+    const result=await loadAttachmentPreview(id,a,previewPage);
+    if(run!==previewRun){URL.revokeObjectURL(result.url);attachmentURLs.delete(result.url);return;}
+    modalURL=result.url;previewPages=result.pages;
+    const img=el('img');img.src=result.url;img.alt=a.name+(a.preview==='pdf'?' — page '+(previewPage+1):'');$('#preview-content').replaceChildren(img);
+    $('#preview-pages').hidden=previewPages<=1;$('#preview-page').textContent=(previewPage+1)+' / '+previewPages;
+    $('#preview-prev').disabled=previewPage===0;$('#preview-next').disabled=previewPage>=previewPages-1;
+  }catch{if(run===previewRun)$('#preview-content').textContent='Preview unavailable. You can still download this file.';}
+}
+$('#preview-close').onclick=()=>$('#attachment-viewer').close();
+$('#attachment-viewer').addEventListener('close',()=>{++previewRun;if(modalURL){URL.revokeObjectURL(modalURL);attachmentURLs.delete(modalURL);modalURL=null;}$('#preview-content').replaceChildren();});
+$('#attachment-viewer').addEventListener('click',e=>{if(e.target===$('#attachment-viewer'))$('#attachment-viewer').close();});
+$('#preview-prev').onclick=()=>{if(previewPage>0){previewPage--;showAttachmentPage();}};
+$('#preview-next').onclick=()=>{if(previewPage<previewPages-1){previewPage++;showAttachmentPage();}};
 async function openMessage(id){
   clearMailHover();
   const run=++readerRun;selected=id;document.body.classList.add('reading');$('#message').hidden=false;
   const m=visibleMessages().find(m=>m.id===id);if(!m)return;
   $('#reader-sender').textContent=m.sender;$('#reader-accent').style.setProperty('--source',m.color);$('#reader-subject').textContent=m.subject;
-  $('#reader-time').textContent=dateText(m,true);$('#reader-address').textContent=`${m.email}\nTo ${m.mailbox || 'Unknown'}`;
+  $('#reader-time').textContent=dateText(m,true);$('#reader-address').textContent=addressLines(m.email,m.mailbox);
+  $('#reader-body').querySelectorAll('iframe').forEach(f=>f._cleanup?.());
+  clearAttachmentPreviews();
   $('#reader-body').textContent='';$('#attachments').replaceChildren();$('#reader').scrollTop=0;render();
   try{
     const detail=await api('read',{id});if(run!==readerRun)return;
     m.unread=false;const cached=state.messages.find(item=>item.id===id);if(cached)cached.unread=false;render();
-    if(detail.html){
-      const frame=el('iframe','mail-html');frame.title='Email content';frame.setAttribute('sandbox','allow-popups allow-popups-to-escape-sandbox');frame.referrerPolicy='no-referrer';
-      frame.srcdoc=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><style>body{font:20px/1.6 -apple-system,sans-serif;margin:12px;overflow-wrap:anywhere;color:#292a28;background:#fff}img,table{max-width:100%}pre{white-space:pre-wrap}a{color:#4175bb}</style>${detail.html}`;
-      $('#reader-body').replaceChildren(frame);
-    }else $('#reader-body').textContent=detail.body;
-    for(const a of detail.attachments || []){const link=el('a','attachment',a.name);link.href='/api/attachment?id='+encodeURIComponent(id)+'&part='+encodeURIComponent(a.id);link.download=a.name;$('#attachments').append(link);}
+    renderConversation(detail);
+    renderAttachments(id,detail.attachments || []);
+    api('replies',{id}).then(result=>{
+      if(run!==readerRun)return;
+      renderConversation({...detail,replies:result.replies || []},true);
+      if(result.error)notice(result.error,()=>openMessage(id));
+    }).catch(()=>{if(run===readerRun)notice('Could not load replies.',()=>openMessage(id));});
   }catch(e){if(run===readerRun)notice(e.message,()=>openMessage(id));}
 }
 function closeReader(){clearMailHover();const previous=selected;++readerRun;selected=null;document.body.classList.remove('reading');$('#message').hidden=true;document.querySelectorAll('.mail-row.selected').forEach(n=>n.classList.remove('selected'));document.querySelectorAll('.mail-item[aria-pressed=true]').forEach(n=>n.setAttribute('aria-pressed','false'));if(keyboardNavigation)[...document.querySelectorAll('.mail-item')].find(n=>n.dataset.id===previous)?.focus({preventScroll:true});}
-$('#back').onclick=closeReader;document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(selected)closeReader();else if(searchActive)closeSearch();}});
+$('#back').onclick=closeReader;document.addEventListener('keydown',e=>{if(e.key==='Escape'){if($('#attachment-viewer').open)return;if(selected)closeReader();else if(searchActive)closeSearch();}});
 function closeSearch(){++searchRun;searchActive=false;searchBusy=false;searchError='';closeReader();render();$('.inbox').scrollTop=inboxScroll;$('#search-toggle').focus();}
 $('#search-toggle').onclick=()=>{closeReader();if(!searchActive)inboxScroll=$('.inbox').scrollTop;searchActive=true;render();$('.inbox').scrollTop=0;$('#search-query').focus();};
 $('#search-close').onclick=closeSearch;
@@ -176,8 +288,9 @@ async function filterControl(action){
 $('#reset-filter').onclick=()=>filterControl('reset');
 $('#run-filter').onclick=()=>filterControl('run');
 let theme='system';try{theme=localStorage.getItem('mail-theme') || 'system';}catch{}
-function setTheme(value){theme=['system','light','dark'].includes(value)?value:'system';document.documentElement.dataset.theme=theme;const label='Appearance: '+theme[0].toUpperCase()+theme.slice(1);$('#appearance').setAttribute('aria-label',label);$('#appearance').title=label+' — click to change';$('#appearance use').setAttribute('href','#'+({system:'system',light:'sun',dark:'moon'}[theme]));try{localStorage.setItem('mail-theme',theme);}catch{}}
+function setTheme(value){theme=['system','light','dark'].includes(value)?value:'system';document.documentElement.dataset.theme=theme;const label='Appearance: '+theme[0].toUpperCase()+theme.slice(1);$('#appearance').setAttribute('aria-label',label);$('#appearance').title=label+' — click to change';$('#appearance use').setAttribute('href','#'+({system:'system',light:'sun',dark:'moon'}[theme]));try{localStorage.setItem('mail-theme',theme);}catch{}updateReaderTheme();}
 $('#appearance').onclick=()=>setTheme({system:'light',light:'dark',dark:'system'}[theme]);setTheme(theme);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',updateReaderTheme);
 async function boot(){
   try{apply(await api('state'));if(state.account)sync();}catch(e){notice('Could not connect to Mail.',boot);}
   if(new URLSearchParams(location.search).has('demo'))history.replaceState(null,'','/');

@@ -34,6 +34,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(result['body'],'Hello Alex');self.assertIn('<b>Alex</b>',result['html']);self.assertNotIn('From:',result['html'])
         from datetime import datetime,timezone
         self.assertEqual(result['date'],datetime(2026,9,23,2,11,tzinfo=timezone.utc).timestamp())
+    def test_outlook_forward_with_leading_subject_whitespace(self):
+        m=EmailMessage();m['From']='Forwarder <f@example.com>';m['To']='reader@example.com';m['Subject']=' FW: Travel details'
+        m.set_content('________________________________\nFrom: Travel Office <travel@example.com>\nSent: Wednesday, September 30, 2026 3:42:08 PM (UTC-05:00) Eastern Time\nTo: Parent <parent@example.com>; Office <office@example.com>\nCc: Student <student@example.com>\nSubject: Travel details\n\nLatest itinerary.\n\nFrom: Parent <parent@example.com>\nTo: Office <office@example.com>\nSubject: Previous request\n\nOld request.')
+        m.add_alternative('<div id="divRplyFwdMsg"><b>From:</b> Travel Office</div><p>Latest itinerary.</p><blockquote>Old request.</blockquote>',subtype='html')
+        result=parse_message(resource(m),'reader@example.com')
+        self.assertEqual(result['sender'],'Travel Office');self.assertEqual(result['email'],'travel@example.com')
+        self.assertEqual(result['subject'],'Travel details');self.assertTrue(result['body'].startswith('Latest itinerary.'))
+        self.assertIn('Latest itinerary.',result['html']);self.assertIn('Old request.',result['body'])
+        self.assertEqual(fixture(' Re: Travel details',m.get_payload()[0].get_content())['sender'],'Professor')
+        m.get_payload()[1].set_content('<p>From: Travel Office</p><p>Latest itinerary.</p>',subtype='html')
+        self.assertIn('Latest itinerary.',parse_message(resource(m),'reader@example.com')['html'])
     def test_attached_mime_html_and_attachments(self):
         original=EmailMessage();original['From']='Original <original@example.com>';original['To']='me@example.com';original['Subject']='Result';original.set_content('Result A')
         original.add_alternative('<p>Hello <b>Alex</b><img src="cid:pic"></p>', subtype='html')
@@ -104,6 +115,23 @@ class JevTests(unittest.TestCase):
             svc=MailService(directory,'http://127.0.0.1:5173');self.assertIsNone(svc.store.rows()[0][2])
 
 class ServiceTests(unittest.TestCase):
+    def test_followups_only_later_messages_cached_without_read_or_classify(self):
+        original=self.s.store.message('a');original['threadId']='thread';self.s.store.save(original)
+        def gmail(path,params):
+            if path.startswith('threads/'):
+                return {'messages':[{'id':'a'},{'id':'new'},{'id':'older'}]}
+            m=EmailMessage();m['From']='Reply <reply@example.com>';m['To']='alex@example.com';m['Subject']='Re: Hello'
+            m.set_content('Later answer')
+            r=resource(m,path.split('/')[-1]);r['internalDate']=str(int((original['date']+(60 if r['id']=='new' else -60))*1000))
+            return r
+        with patch.object(self.s,'gmail',side_effect=gmail): result=self.s.followups('a')
+        self.assertEqual([r['id'] for r in result['replies']],['new'])
+        self.assertFalse(self.s.store.get('read:new',False))
+        self.assertEqual(len(self.s.store.rows()),1)
+        cache=self.s.store.get('thread-replies:a');cache['checked']=0;self.s.store.set('thread-replies:a',cache)
+        with patch.object(self.s,'gmail',side_effect=ServiceError('Offline')):
+            self.assertEqual(self.s.followups('a')['replies'],result['replies'])
+
     def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.s=MailService(self.tmp.name,'http://127.0.0.1:5173');self.s.store.save(fixture())
     def tearDown(self):self.tmp.cleanup()
     def test_expectations_score_and_reset(self):
@@ -163,6 +191,21 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(message['decision'],'hide');self.assertEqual(message['confidence'],.02)
         self.s.reset_filter()
         self.assertNotIn('confidence',self.s.snapshot()['messages'][0])
+    def test_old_cache_reader_repairs_or_falls_back_without_losing_labels(self):
+        old=self.s.store.message('a');old['parserVersion']=2
+        old['body']='Latest answer';old['html']='<p>Incorrect old quote</p>'
+        self.s.store.save(old);self.s.set_expected('a',True)
+        with patch.object(self.s,'gmail',side_effect=ServiceError('Offline')):
+            result=self.s.read('a')
+        self.assertEqual(result['conversation'][0]['body'],'Latest answer')
+        self.assertEqual(result['conversation'][0]['html'],'')
+        self.assertTrue(result['expectedKeep'])
+        raw=EmailMessage();raw['From']='Teacher <teacher@example.com>';raw['Subject']='Re: Question';raw.set_content('Restored latest answer')
+        with patch.object(self.s,'gmail',return_value=resource(raw)):
+            result=self.s.read('a')
+        self.assertEqual(result['conversation'][0]['body'],'Restored latest answer')
+        self.assertTrue(result['expectedKeep']);self.assertFalse(result['unread'])
+        with self.s.store.connect() as db:self.assertEqual(db.execute("SELECT retained FROM mail WHERE id='a'").fetchone()[0],1)
     def test_search_includes_archived_and_does_not_pollute_cache(self):
         message=EmailMessage();message['From']='Sender <sender@example.com>';message['Subject']='Archived result';message.set_content('Searchable body')
         raw=resource(message,id='archived',labels=['UNREAD'])

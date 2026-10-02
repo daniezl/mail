@@ -12,7 +12,8 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
-from .parser import parse_message
+from .parser import PARSER_VERSION, parse_message
+from .attachments import attachment_metadata
 
 MODEL = 'jev-1.13.0'
 PROMPT_VERSION = 5
@@ -251,10 +252,18 @@ class MailService:
         result['otp'] = message.get('otp')
         if detail:
             result['body'] = message['body']; result['html'] = message['html']
-            result['attachments'] = [{k: v for k, v in a.items() if k != 'data'} for a in message.get('attachments', [])]
+            from .conversation import conversation
+            from email.utils import formataddr
+            headers = {**message.get('headers', {}), 'from':formataddr((message['sender'],message['email'])),
+                       'subject':message['subject']}
+            existing=message.get('conversation', [])
+            if existing: headers['date']=existing[0].get('sent','')
+            result['conversation'] = (conversation(message['body'],message.get('html',''),headers,True)
+                                      if message.get('parserVersion',0)>=3 else existing)
+            result['attachments'] = [attachment_metadata(a, message.get('html', '')) for a in message.get('attachments', [])]
         return result
     def status(self):
-        return {'account': self.store.get('account'), 'busy': self.busy, 'classifying': self.classifying,
+        return {'account': self.store.get('account'), 'ownAddresses': self.store.get('own_addresses', []), 'busy': self.busy, 'classifying': self.classifying,
                 'error': self.sync_error or self.classify_error, 'needsLogin': self.needs_login,
                 'filterEnabled': self.store.get('filter_enabled', True), 'generation': self.generation, 'progress': self.progress}
     def snapshot(self):
@@ -265,11 +274,23 @@ class MailService:
                 'score': {'correct': correct, 'evaluated': len(evaluated), 'total': len(rows)}, 'messages': [{**self.public(m), 'decision': d} for m, a, d, c in rows
                  if 'INBOX' in m['labels']]}
     def cached_message(self, id):
-        try: return self.store.message(id)
+        try: message = self.store.message(id)
         except ServiceError:
             with self.sync_lock:
                 if id in self.search_cache: return self.search_cache[id]
             raise
+        if message.get('parserVersion') != PARSER_VERSION:
+            try:
+                message = parse_message(self.gmail('messages/' + quote(id, safe=''), {'format':'raw'}), self.store.get('account', ''))
+                self.store.save(message)
+            except ServiceError:
+                # Old HTML may already have lost the current reply. Offline,
+                # use its intact text until we can fetch and repair the source.
+                from .conversation import conversation
+                headers = {'from':message['sender'] + ' <' + message['email'] + '>',
+                           'subject':message['subject'], **message.get('headers', {})}
+                message['conversation'] = conversation(message['body'], '', headers)
+        return message
     def search(self, query, page=None):
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
             raise ServiceError('Enter a search query (up to 1,000 characters).')
@@ -292,6 +313,38 @@ class MailService:
         m = self.cached_message(id)
         self.store.set('read:' + id, True)
         return self.public(m, detail=True)
+    def followups(self, id):
+        message=self.cached_message(id)
+        cached=self.store.get('thread-replies:'+id, {})
+        if cached and time.time()-cached.get('checked',0)<30:
+            return {'replies':cached.get('replies',[])}
+        try:
+            thread_id=message.get('threadId')
+            if not thread_id:
+                metadata=self.gmail('messages/'+quote(id,safe=''), {'format':'minimal'})
+                thread_id=metadata.get('threadId')
+                if not thread_id: return {'replies':[]}
+                # Metadata-only update must not invalidate classification decisions.
+                message['threadId']=thread_id
+                with self.store.connect() as db:
+                    db.execute('UPDATE mail SET payload=? WHERE id=?',(json.dumps(message),id))
+            thread=self.gmail('threads/'+quote(thread_id,safe=''), {'format':'minimal'})
+            def fetch(item):
+                if item['id']==id: return None
+                raw=self.gmail('messages/'+quote(item['id'],safe=''), {'format':'raw'})
+                reply=parse_message(raw,self.store.get('account',''))
+                if reply['date']<=message['date'] or 'DRAFT' in reply['labels']: return None
+                parts=self.public(reply,detail=True)['conversation']
+                if not parts: return None
+                return {**parts[0], 'id':reply['id'], 'date':reply['date']}
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                replies=[r for r in pool.map(fetch,thread.get('messages',[])) if r]
+            replies.sort(key=lambda r:(r['date'],r['id']))
+            self.store.set('thread-replies:'+id,{'checked':time.time(),'replies':replies})
+            return {'replies':replies}
+        except ServiceError:
+            return {'replies':cached.get('replies',[]), 'error':'Could not load replies.'}
+
     def content_key(self, m, prompt=None, model=None):
         content = {k: m[k] for k in ('sender', 'email', 'mailbox', 'subject', 'body', 'headers', 'complete')}
         return hashlib.sha256(json.dumps([content, model or private_config(self.store.directory)['model'], PROMPT_VERSION, prompt if prompt is not None else filter_prompt()], sort_keys=True).encode()).hexdigest()
@@ -302,7 +355,7 @@ class MailService:
         items = listing.get('messages', [])
         def fetch(item):
             id = item['id']
-            if id in cached and cached[id].get('parserVersion') == 2:
+            if id in cached and cached[id].get('parserVersion') == PARSER_VERSION:
                 result = self.gmail('messages/' + quote(id, safe=''), {'format': 'minimal'})
                 m = cached[id]; m['labels'] = result.get('labelIds', [])
                 return m

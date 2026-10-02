@@ -37,3 +37,31 @@ body.reading .inbox{display:none}body.reading .reader{display:block}
 #search-form{display:flex;align-items:center;gap:12px;margin:0 18px 28px}#search-query{min-width:0;flex:1;background:transparent;color:var(--ink);border:0;border-bottom:1px solid var(--line);padding:12px 0;font:22px/1.5 -apple-system,sans-serif}#search-query:focus{outline:none;border-color:var(--blue)}#search-status{margin:0 18px 20px;color:var(--muted);font-size:16px}#search-more{display:block;margin:24px auto}
 
 .mail-main{position:relative;flex:1;min-width:0}.has-code .subject{padding-right:36px}.code-copy{position:absolute;right:150px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;width:30px;height:30px;padding:5px;border:0;border-radius:5px;background:transparent;color:var(--muted)}.code-copy:hover{background:var(--line);color:var(--ink)}.code-copy svg{width:18px;height:18px}@media(max-width:900px){.code-copy{right:122px}}@media(max-width:620px){.code-copy{right:77px}}
+
+.reader-body{white-space:normal}.part-content{white-space:pre-wrap;font-size:20px;line-height:1.65}.conversation-html{display:block;height:60px;min-height:0;border-radius:0;background:var(--bg)}.quoted-message{border-top:1px solid var(--line);padding:0 0 0;margin:0}.quote-summary{display:flex;align-items:center;gap:16px;cursor:pointer;list-style:none;padding:18px 0;color:var(--muted);font-size:17px}.quote-summary::-webkit-details-marker{display:none}.quote-summary::before{content:'›';font-size:22px;transition:transform .15s}.quoted-message[open]>.quote-summary::before{transform:rotate(90deg)}.quote-sender{color:var(--ink)}.quote-time{margin-left:auto;font-size:14px;text-align:right}.quote-address{font-size:14px;color:var(--muted);overflow-wrap:anywhere;margin-bottom:18px}.quoted-message>.part-content{padding-bottom:24px}.quoted-message+.part-content{border-top:1px solid var(--line);padding-top:30px}.reader-address{white-space:pre-line;font-size:14px}.quote-summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+
+#attachments{display:grid;gap:24px;margin-top:32px}#attachments:empty{display:none}.attachment-card{display:block;width:100%;padding:0;border:1px solid var(--line);border-radius:14px;background:var(--sidebar);overflow:hidden;text-align:left}.attachment-card:hover{border-color:var(--muted)}.attachment-surface{height:360px;display:flex;align-items:center;justify-content:center;padding:20px;color:var(--muted);font-size:18px;overflow:hidden}.attachment-surface img{width:100%;height:100%;object-fit:contain}.attachment-placeholder{letter-spacing:.02em}.attachment-footer{display:flex;align-items:center;gap:20px;border-top:1px solid var(--line);padding:18px 22px;background:var(--bg)}.attachment-name{font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachment-size{margin-left:auto;flex:none;font-size:14px;color:var(--muted)}#attachment-viewer{width:min(1100px,94vw);max-width:94vw;height:90dvh;max-height:90dvh;padding:0;border:1px solid var(--line);border-radius:16px;background:var(--bg);color:var(--ink)}#attachment-viewer[open]{display:flex;flex-direction:column}#attachment-viewer::backdrop{background:#0009;backdrop-filter:blur(4px)}.preview-toolbar{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line)}#preview-name{font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:auto}#preview-download{flex:none;text-decoration:none}#preview-content{flex:1;min-height:0;overflow:auto;padding:24px;text-align:center;color:var(--muted);font-size:18px}#preview-content img{display:block;max-width:100%;height:auto;margin:0 auto}#preview-pages{display:flex;gap:20px;align-items:center;justify-content:center;padding:8px;border-top:1px solid var(--line);font-size:15px}@media(max-width:620px){.attachment-surface{height:280px;padding:12px}.attachment-footer{padding:14px}.preview-toolbar{padding:10px;gap:8px}#preview-content{padding:12px}}
+
+.pdf-preview{align-items:flex-start}.pdf-preview img{height:auto;object-fit:cover;object-position:top}
+
+/* Quiet, separate cards for earlier messages in the conversation. */
+.quoted-message{margin:0 0 10px;border:1px solid var(--line);border-radius:10px;background:var(--sidebar);overflow:hidden}
+.quote-summary{gap:12px;min-height:60px;padding:16px 20px;font-size:16px;line-height:1.5;transition:background .15s}
+.quote-summary:hover{background:var(--hover)}
+.quote-summary::before{font-size:20px;line-height:1;color:var(--muted)}
+.quote-sender{color:var(--muted);font-weight:500}
+.quote-time{font-size:13px;color:var(--muted)}
+.quoted-message[open]>.quote-summary{border-bottom:1px solid var(--line)}
+.quoted-message[open] .quote-sender{color:var(--ink)}
+.quoted-message>.quote-address{padding:18px 20px 0;margin-bottom:16px;white-space:pre-line}
+.quoted-message>.part-content{padding:0 20px 22px}
+.quoted-message+.part-content{border:0;padding-top:26px}
+.quote-summary:focus-visible{outline-offset:-3px;border-radius:9px}
+@media(max-width:620px){.quote-summary{padding:14px;gap:10px;flex-wrap:wrap}.quote-time{font-size:12px}.quoted-message>.part-content{padding:0 14px 18px}.quoted-message>.quote-address{padding:14px 14px 0}}
+
+/* Reader navigation sits in a separate gutter beside the mail. */
+.reader-toolbar{height:0;margin:0;padding:0}
+#back{position:fixed;top:98px;left:max(8px,calc(50% - 454px));z-index:4;background:var(--bg)}
+#back:hover{background:var(--hover)}
+@media(max-width:950px){body.reading #message{margin-left:56px;padding-left:24px;padding-right:24px}#back{left:8px}}
+@media(max-width:620px){#back{top:80px}body.reading #message{margin-left:48px;padding-left:12px;padding-right:20px}}

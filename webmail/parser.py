@@ -7,6 +7,9 @@ from email.utils import parseaddr, getaddresses, parsedate_to_datetime
 from html import escape
 from html.parser import HTMLParser
 import re
+from .conversation import conversation, clean_notice
+
+PARSER_VERSION = 3
 
 
 def decode64(value):
@@ -69,7 +72,7 @@ def forwarded_html(source):
     # Outlook's own forwarding header is a separate, bounded div. Preserve the
     # original HTML below it rather than flattening the entire message.
     marker = re.search(r'<div\b[^>]*\bid=["\']divRplyFwdMsg["\'][^>]*>', source, re.I)
-    if not marker: return ''
+    if not marker or plain_html(source[:marker.start()]).strip(): return ''
     depth = 1
     for token in re.finditer(r'</?div\b[^>]*>', source[marker.end():], re.I):
         depth += -1 if token[0].startswith('</') else 1
@@ -110,15 +113,15 @@ def parse_message(resource, account):
     headers = {k.lower(): str(v) for k, v in original.items()}
     forwarded = original is not root
     match = re.search(r'(?:-+\s*Forwarded message\s*-+|Begin forwarded message:)\s*\n((?:(?:From|Date|Sent|Subject|To|Cc):[^\n]*\n|\s*\n){2,})', body, re.I)
-    if not match and re.match(r'^(fw|fwd):', headers.get('subject', ''), re.I):
+    if not match and re.match(r'^\s*(fw|fwd):', headers.get('subject', ''), re.I):
         match = re.search(r'(?:^|\n)_{5,}\s*\n((?:(?:From|Date|Sent|Subject|To|Cc):[^\n]*\n|[ \t]*\n){3,})', body, re.I)
-    if match:
+    if match and not body[:match.start()].strip():
         fields = {k.lower(): v.strip() for k, v in re.findall(r'^(From|Date|Sent|Subject|To|Cc):\s*(.+)$', match[1], re.M | re.I)}
         if fields.get('from') and fields.get('to'):
             if 'sent' in fields and 'date' not in fields: headers.pop('date', None)
             headers.update(fields); forwarded = True
             body = body[match.end():].strip()
-            source_html = forwarded_html(source_html)
+            source_html = forwarded_html(source_html) or source_html
     sender, address = parseaddr(headers.get('from', ''))
     recipients = getaddresses([headers.get('to', '')])
     mailbox = recipients[0][1].lower() if len(recipients) == 1 else ''
@@ -126,14 +129,16 @@ def parse_message(resource, account):
         for key in ('x-original-to', 'x-forwarded-to', 'delivered-to'):
             candidate = parseaddr(headers.get(key, ''))[1].lower()
             if candidate and candidate != account.lower(): mailbox = candidate; break
-        if re.match(r'^(fwd?|转发):', headers.get('subject', ''), re.I): mailbox = ''
+        if re.match(r'^\s*(fwd?|转发):', headers.get('subject', ''), re.I): mailbox = ''
     received = int(resource.get('internalDate', 0)) / 1000
     date = header_date(headers, received)
-    message = {'parserVersion': 2, 'id': resource['id'], 'sender': sender or address or 'Unknown', 'email': address,
+    message = {'parserVersion': PARSER_VERSION, 'id': resource['id'], 'threadId':resource.get('threadId'), 'sender': sender or address or 'Unknown', 'email': address,
                'mailbox': mailbox, 'subject': headers.get('subject', '(No subject)'), 'date': date, 'received': received,
                'body': body, 'html': safe_html(source_html, images), 'labels': resource.get('labelIds', []),
                'attachments': attachments, 'complete': bool(body) and '\ufffd' not in body,
                'headers': {k: headers[k] for k in ('to', 'cc', 'list-id', 'list-unsubscribe', 'precedence', 'in-reply-to') if k in headers}}
+    message['conversation'] = conversation(body, message['html'], headers, forwarded)
+    message['body'] = clean_notice(body)
     message['otp'] = extract_otp(message)
     return message
 

@@ -31,7 +31,7 @@ Mail currently focuses on reading and filtering. Sending, replying, and backgrou
 
 ## Get started
 
-You need **Python 3.11+**, a Gmail account, a Google Web OAuth client, and a TypeSafe API key. The server uses the Python standard library; there are no Python packages or frontend build steps to install.
+You need **Python 3.11+**, a Gmail account, a Google Web OAuth client, and a TypeSafe API key. The server uses the Python standard library plus PyMuPDF for local PDF previews. No frontend build step is required.
 
 ### 1. Clone the repository
 
@@ -85,6 +85,7 @@ The default model is pinned to `jev-1.13.0`; set `JEV_MODEL` to override it. Mai
 ### 4. Start Mail
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 server.py
 ```
 
@@ -139,3 +140,5 @@ node --check app.js
 ```
 
 Node.js is only needed for the JavaScript syntax check. Tests cover parsing, sanitization, classification validation and fallback, read state, cache retention, filter resets, OAuth scope, and request guards.
+
+Attachment previews are rendered locally. Images use large thumbnails; PDFs show the first page and support page navigation in the expanded preview. Inline images already present in the message are omitted from the attachment list. Unsupported files remain downloadable. PDF previews require PyMuPDF from `requirements.txt`.
