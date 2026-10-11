@@ -114,11 +114,6 @@ import SwiftUI
             // Still unseen on the server; the next launch replays the arrival.
         }
     }
-    /// Local only: lets the inbox play the arrival animation again for preview.
-    func replayArrival(_ ids: [String]) {
-        let replay = Set(ids)
-        for i in messages.indices where replay.contains(messages[i].id) { messages[i].seen = false }
-    }
     func read(_ id: String) async {
         do {
             _ = try await api.request("/api/read",body:["id":id])

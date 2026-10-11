@@ -2,7 +2,7 @@
 
 Native SwiftUI client for the existing Mail server. iOS 17+, light/dark appearance follows the system.
 
-The inbox contains only mail, search, and **Show filtered** (off by default). Reading supports collapsed conversation cards, later replies, HTML with JavaScript and remote resources disabled, large attachment previews and Quick Look. Verification-code copying marks the message read and briefly shows a checkmark. Opened messages have protected on-device offline copies. Search queries Gmail through the server and includes archived/filtered mail.
+The inbox contains only mail, search, and **Show filtered** (off by default). Hidden mail that no client has shown yet appears briefly, then flies into the filter button with a haptic tap. A batch always takes the same time, so more mail simply moves faster. Seen state lives on the server and is shared with the website. Long-press the filter button to switch between the swipe and shrink animations, or to preview one with 1, 3 or 12 sample emails. Previews never touch the server, so they work without new mail. Reading supports collapsed conversation cards, later replies, HTML with JavaScript and remote resources disabled, large attachment previews and Quick Look. Verification-code copying marks the message read and briefly shows a checkmark. Opened messages have protected on-device offline copies. Search queries Gmail through the server and includes archived/filtered mail.
 
 Open `Mail.xcodeproj`, select the Mail scheme and your iPhone. The app uses `https://mail.daniezl.com`; sign in with the website credentials, not the Gmail password. Credentials are stored in this device's Keychain. Gmail and Jev credentials stay on the server. No API keys or personal prompts belong in the app bundle.
 

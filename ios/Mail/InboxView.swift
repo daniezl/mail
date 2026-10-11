@@ -31,9 +31,11 @@ struct InboxView: View {
     @State private var cleaning = false
     @State private var landings = 0
     @State private var cleanup = CleanupCoordinator()
+    /// Sample mail for previewing the cleanup; never sent to the server.
+    @State private var demo: [MailMessage] = []
     var displayed: [MailMessage] {
         if !store.submittedSearch.isEmpty { return store.searchResults }
-        return store.messages.filter {
+        return demo.filter { !cleaned.contains($0.id) } + store.messages.filter {
             showFiltered || $0.starred == true || $0.expectedKeep || ["keep", "uncertain"].contains($0.decision ?? "")
                 || (Self.awaitsCleanup($0) && !cleaned.contains($0.id))
         }
@@ -71,6 +73,7 @@ struct InboxView: View {
                         .id(message.id)
                         .onGeometryChange(for:CGRect.self) { $0.frame(in:.global) } action: { cleanup.rows[message.id] = $0 }
                         .onDisappear { cleanup.rows[message.id] = nil }
+                        .allowsHitTesting(!demo.contains { $0.id == message.id })
                 }
                 if store.searching { ProgressView().frame(maxWidth:.infinity) }
                 if store.nextPage != nil && !store.submittedSearch.isEmpty {
@@ -84,6 +87,9 @@ struct InboxView: View {
                     transaction.disablesAnimations = true
                     withTransaction(transaction) { scroll.scrollTo(first.id,anchor:.top) }
                 }
+            }
+            .onChange(of:demo.first?.id) { _,id in
+                if let id { withAnimation { scroll.scrollTo(id,anchor:.top) } }
             }
             .overlay { if displayed.isEmpty && !store.searching && store.error == nil { Text("No mail").foregroundStyle(.tertiary) } }
             .safeAreaInset(edge:.top,spacing:0) {
@@ -137,10 +143,10 @@ struct InboxView: View {
             processArrivals()
         }
     }
-    private func clean(_ messages: [MailMessage]) async {
+    private func clean(_ messages: [MailMessage], preview: Bool = false) async {
         do { try await Task.sleep(for:.seconds(CleanupTiming.settle)) } catch { return }
         // Leave them in place if the inbox went out of view; the next visit retries.
-        guard phase == .active, store.path.isEmpty, store.submittedSearch.isEmpty, !showFiltered else { return }
+        guard phase == .active, store.path.isEmpty, store.submittedSearch.isEmpty, preview || !showFiltered else { return }
         cleanup.prepare()
         if reduceMotion {
             withAnimation(.easeOut(duration:0.25)) { cleaned.formUnion(messages.map(\.id)) }
@@ -157,17 +163,37 @@ struct InboxView: View {
             }
             try? await Task.sleep(for:.seconds(style.duration))
         }
-        await store.markSeen(messages.map(\.id))
+        if !preview { await store.markSeen(messages.map(\.id)) }
     }
     private func land(_ flight: CleanupFlight) {
         flights.removeAll { $0.id == flight.id }
         landings += 1
         cleanup.land()
     }
-    private func previewCleanup() {
-        let ids = store.messages.filter { $0.decision == "hide" && $0.starred != true && !$0.expectedKeep }.prefix(4).map(\.id)
-        cleaned.subtract(ids)
-        store.replayArrival(ids)
+    private static let demoSenders: [(String, String)] = [
+        ("Weekly Digest", "Your top stories this week"), ("Shop Rewards", "Points expire soon — redeem now"),
+        ("Event Team", "Last chance to register"), ("App Updates", "What's new in version 4.2"),
+        ("Newsletter", "Ten tips for a calmer morning"), ("Promotions", "48-hour flash sale starts today"),
+        ("Community", "You have 3 new notifications"), ("Travel Deals", "Fares from $59 this weekend")]
+    private func previewCleanup(count: Int) {
+        guard !cleaning, store.path.isEmpty, store.submittedSearch.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        let colors = ["#569078", "#bc806b", "#a38d56", "#718aad", "#9883a7"]
+        let messages = (0..<count).map { i in
+            let (sender, subject) = Self.demoSenders[i % Self.demoSenders.count]
+            return MailMessage(id:"preview-" + UUID().uuidString,sender:sender,email:"preview@example.com",mailbox:"",
+                               subject:subject,date:now - Double(i) * 60,received:now - Double(i) * 60,
+                               color:colors[i % colors.count],unread:true,expectedKeep:false,decision:"hide",seen:false)
+        }
+        cleaning = true
+        withAnimation(.snappy) { demo = messages }
+        Task {
+            await clean(messages,preview:true)
+            demo = []
+            cleaned.subtract(messages.map(\.id))
+            cleaning = false
+            processArrivals()
+        }
     }
     private func syncStatus(at date: Date) -> String {
         guard let timestamp = store.lastSyncedAt else { return "Not synced yet" }
@@ -178,12 +204,16 @@ struct InboxView: View {
         return "Synced \(seconds / 86400)d ago"
     }
     private var filteredButton: some View {
-        // Long press picks the cleanup animation and can replay it on recent hidden mail.
+        // Long press picks the cleanup animation and previews it with sample mail.
         Menu {
             Picker("Cleanup animation",selection:$cleanupStyle) {
                 ForEach(CleanupStyle.allCases) { Text($0.title).tag($0) }
             }
-            Button("Preview cleanup",systemImage:"play",action:previewCleanup).disabled(showFiltered || cleaning)
+            Section("Preview cleanup") {
+                ForEach([1, 3, 12],id:\.self) { count in
+                    Button(count == 1 ? "1 email" : "\(count) emails",systemImage:"play") { previewCleanup(count:count) }
+                }
+            }.disabled(cleaning)
         } label: {
             Image(systemName:"line.3.horizontal.decrease")
                 .foregroundStyle(showFiltered ? Color.blue : Color.primary)
