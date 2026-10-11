@@ -132,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/replies': return self.send(200, SERVICE.followups(data.get('id', '')))
             if path == '/api/star': return self.send(200, SERVICE.star(data.get('id'), data.get('starred')))
             if path == '/api/read': return self.send(200, SERVICE.read(data.get('id', '')))
+            if path == '/api/seen': return self.send(200, SERVICE.mark_seen(data.get('ids')))
             raise ServiceError('Not found.', 404)
         except (ValueError, TypeError): self.send(400, {'error': 'Invalid request.'})
         except ServiceError as e: self.send(e.status, {'error': str(e)})

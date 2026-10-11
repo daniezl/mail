@@ -106,6 +106,16 @@ function render(){
   $('#empty').textContent=searchActive?'No results':state.error?'Mail is temporarily unavailable':'No mail yet';
 
   if(selected && !visibleMessages().some(m=>m.id===selected))closeReader();
+  markSeen();
+}
+// Mail stays unseen until a client actually shows it, so the iOS app can still
+// animate hidden mail that never appeared here.
+const seenPending=new Set();
+function markSeen(){
+  if(searchActive || document.hidden || !state.account)return;
+  const ids=visibleMessages().filter(m=>m.seen===false && m.decision && !seenPending.has(m.id)).map(m=>m.id);if(!ids.length)return;
+  ids.forEach(id=>seenPending.add(id));
+  api('seen',{ids}).then(()=>{for(const m of state.messages)if(ids.includes(m.id))m.seen=true;}).catch(()=>{}).finally(()=>ids.forEach(id=>seenPending.delete(id)));
 }
 async function markCopiedRead(id){
   try{

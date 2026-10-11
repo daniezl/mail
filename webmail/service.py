@@ -101,6 +101,13 @@ class Store:
             columns = {row[1] for row in db.execute('PRAGMA table_info(mail)')}
             if 'retained' not in columns:
                 db.execute('ALTER TABLE mail ADD COLUMN retained INTEGER NOT NULL DEFAULT 0')
+            if 'seen' not in columns:
+                # Mail cached before this column existed is baselined, so clients
+                # do not replay arrival for the whole existing inbox.
+                db.execute('ALTER TABLE mail ADD COLUMN seen INTEGER NOT NULL DEFAULT 0')
+                db.execute('UPDATE mail SET seen=1')
+                if db.execute('SELECT 1 FROM mail LIMIT 1').fetchone():
+                    db.execute("INSERT OR REPLACE INTO settings VALUES ('seen_baseline','true')")
             db.execute("UPDATE mail SET retained=1 WHERE decision='keep' OR id IN (SELECT substr(key,10) FROM settings WHERE key LIKE 'expected:%' AND value='true')")
         os.chmod(self.path, 0o600)
     def connect(self): return sqlite3.connect(self.path, timeout=30)
@@ -112,6 +119,10 @@ class Store:
     def rows(self):
         with self.connect() as db: rows = db.execute('SELECT payload,annotation,decision,cache_key FROM mail').fetchall()
         return [(json.loads(p), a, d, c) for p, a, d, c in rows]
+    def seen_ids(self):
+        with self.connect() as db: return {row[0] for row in db.execute('SELECT id FROM mail WHERE seen=1')}
+    def mark_seen(self, ids):
+        with self.connect() as db: db.executemany('UPDATE mail SET seen=1 WHERE id=?', [(id,) for id in ids])
     def message(self, id):
         with self.connect() as db: row = db.execute('SELECT payload FROM mail WHERE id=?', (id,)).fetchone()
         if not row: raise ServiceError('Mail not cached.', 404)
@@ -280,9 +291,15 @@ class MailService:
         rows = sorted(self.store.rows(), key=lambda r: r[0]['received'], reverse=True)
         evaluated = [(m,d) for m,a,d,c in rows if d is not None]
         correct = sum(d == ('keep' if self.store.get('expected:' + m['id'], False) else 'hide') for m,d in evaluated)
+        seen = self.store.seen_ids()
         return {**self.status(), 'prompt': filter_prompt(),
-                'score': {'correct': correct, 'evaluated': len(evaluated), 'total': len(rows)}, 'messages': [{**self.public(m), 'decision': d} for m, a, d, c in rows
+                'score': {'correct': correct, 'evaluated': len(evaluated), 'total': len(rows)}, 'messages': [{**self.public(m), 'decision': d, 'seen': m['id'] in seen} for m, a, d, c in rows
                  if 'INBOX' in m['labels']]}
+    def mark_seen(self, ids):
+        if not isinstance(ids, list) or len(ids) > 500 or any(not isinstance(id, str) or not id for id in ids):
+            raise ServiceError('Invalid seen request.')
+        self.store.mark_seen(ids)
+        return {'ok': True}
     def cached_message(self, id):
         try: message = self.store.message(id)
         except ServiceError:
@@ -427,6 +444,9 @@ class MailService:
         with self.sync_lock:
             ids, _ = self.fetch_page()
             self.trim_cache(ids)
+            if not self.store.get('seen_baseline'):
+                with self.store.connect() as db: db.execute('UPDATE mail SET seen=1')
+                self.store.set('seen_baseline', True)
             self.store.set('last_synced_at', time.time())
     def classify_message(self, m, config):
         content = {k: m[k] for k in ('sender', 'email', 'mailbox', 'subject', 'body', 'headers', 'complete')}

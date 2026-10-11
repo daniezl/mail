@@ -134,6 +134,26 @@ class ServiceTests(unittest.TestCase):
 
     def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.s=MailService(self.tmp.name,'http://127.0.0.1:5173');self.s.store.save(fixture())
     def tearDown(self):self.tmp.cleanup()
+    def test_seen_is_shared_persistent_and_survives_reclassification(self):
+        self.s.store.save(fixture(id='b'))
+        seen=lambda svc:{m['id']:m['seen'] for m in svc.snapshot()['messages']}
+        self.assertEqual(seen(self.s),{'a':False,'b':False})
+        self.s.mark_seen(['b','missing'])
+        self.s.run_filter()
+        self.assertEqual(seen(MailService(self.tmp.name,'http://127.0.0.1:5173')),{'a':False,'b':True})
+        for bad in (None,'a',[1],[''],['x']*501):
+            with self.assertRaises(ServiceError):self.s.mark_seen(bad)
+    def test_first_sync_baselines_seen_and_later_mail_is_unseen(self):
+        with patch.object(self.s,'fetch_page',return_value=(['a'],None)):self.s.sync()
+        self.s.store.save(fixture(id='new'))
+        with patch.object(self.s,'fetch_page',return_value=(['new','a'],None)):self.s.sync()
+        self.assertEqual({m['id']:m['seen'] for m in self.s.snapshot()['messages']},{'a':True,'new':False})
+    def test_existing_cache_is_baselined_on_seen_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);s.save(fixture())
+            with s.connect() as db:db.execute('ALTER TABLE mail DROP COLUMN seen')
+            svc=MailService(directory,'http://127.0.0.1:5173')
+            self.assertTrue(svc.snapshot()['messages'][0]['seen']);self.assertTrue(svc.store.get('seen_baseline'))
     def test_expectations_score_and_reset(self):
         self.s.store.save(fixture(id='b'));self.s.store.save(fixture(id='c'))
         self.s.set_expected('a', True)
