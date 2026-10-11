@@ -1,7 +1,13 @@
 import SwiftUI
 
+enum RefreshFeedback: Equatable { case idle, checking, noNewMail }
+
 @MainActor final class MailStore: ObservableObject {
     let api = MailAPI()
+    @Published var refreshFeedback = RefreshFeedback.idle
+    private var refreshJob: Task<Void,Never>?
+    private var refreshAnnounced = false
+    private var refreshVersion = 0
     @Published var lastSyncedAt = UserDefaults.standard.object(forKey:"lastSyncedAt") as? Double
     @Published var signedIn = false
     @Published var messages: [MailMessage] = []
@@ -29,12 +35,62 @@ import SwiftUI
             signedIn = true; apply(state); error = nil
         } catch { self.error = error.localizedDescription; api.login = nil }
     }
-    func refresh(sync: Bool = false) async {
-        guard signedIn else { return }
+    func refresh(sync: Bool = false, announce: Bool = false) async {
+        guard signedIn, !Task.isCancelled else { return }
+        // Show feedback immediately, including while a quiet poll is finishing.
+        if announce { refreshFeedback = .checking }
+        // A pull during a foreground check joins it instead of restarting the animation.
+        if let job=refreshJob {
+            let covered = !announce || refreshAnnounced
+            await job.value
+            if covered || Task.isCancelled { return }
+        }
+        guard signedIn, !Task.isCancelled else { return }
+        refreshVersion += 1
+        let version=refreshVersion
+        refreshAnnounced=announce
+        let job=Task { await performRefresh(sync:sync,announce:announce) }
+        refreshJob=job
+        await withTaskCancellationHandler { await job.value } onCancel: { job.cancel() }
+        if version == refreshVersion { refreshJob=nil; refreshAnnounced=false }
+    }
+    private func performRefresh(sync:Bool,announce:Bool) async {
+        let knownIDs=Set(messages.map(\.id))
+        if announce { refreshFeedback = .checking }
         do {
-            if sync { _ = try await api.request("/api/sync",body:[:]) }
-            apply(try await api.state())
-        } catch { self.error = error.localizedDescription }
+            // Refresh CSRF/session before requesting a real Gmail check.
+            var state=try await api.state()
+            try Task.checkCancellation()
+            apply(state)
+            if sync || announce {
+                struct InboxCheck: Decodable { let ids: [String] }
+                let check=try JSONDecoder().decode(InboxCheck.self,from:await api.request("/api/check",body:[:]))
+                let ready=Set(state.messages.filter { $0.decision != nil }.map(\.id))
+                let pending=Set(check.ids).subtracting(ready)
+                let deadline=ContinuousClock.now.advanced(by:.seconds(45))
+                while !pending.isEmpty {
+                    try Task.checkCancellation()
+                    state=try await api.state()
+                    try Task.checkCancellation()
+                    apply(state)
+                    let classified=Set(state.messages.filter { $0.decision != nil }.map(\.id))
+                    if pending.isSubset(of:classified) { break }
+                    if state.needsLogin == true || state.busy == false {
+                        throw MailError(message:state.error ?? "Could not check for new mail.")
+                    }
+                    guard ContinuousClock.now < deadline else { throw MailError(message:"Refresh timed out.") }
+                    try await Task.sleep(for:.milliseconds(500))
+                }
+            }
+            try Task.checkCancellation()
+            if announce {
+                let hasNewMail=state.messages.contains { !knownIDs.contains($0.id) }
+                refreshFeedback = hasNewMail ? .idle : .noNewMail
+            }
+        } catch {
+            if !Task.isCancelled { self.error = error.localizedDescription }
+            if announce { refreshFeedback = .idle }
+        }
     }
     func apply(_ state: MailSnapshot) {
         if let timestamp = state.lastSyncedAt {

@@ -428,6 +428,29 @@ class MailService:
             ids, _ = self.fetch_page()
             self.trim_cache(ids)
             self.store.set('last_synced_at', time.time())
+    def check_inbox(self):
+        if not self.store.get('account'):
+            raise ServiceError('Reconnect Gmail to continue.', 401)
+        if time.time() < self.sync_retry_at:
+            raise ServiceError('Gmail is temporarily rate limiting requests.', 429)
+        # Match the normal sync's recent-mail window with just one ID request.
+        # Label reconciliation and older retained mail need not block this check.
+        result = self.gmail('messages', {'q':'in:inbox', 'maxResults':CACHE_LIMIT})
+        ids = list(dict.fromkeys(item['id'] for item in result.get('messages', [])))
+        self.start(recent_ids=ids)
+        return {'ids':ids}
+
+    def fetch_recent(self, ids):
+        cached = {m['id'] for m, a, d, c in self.store.rows()}
+        def fetch(id):
+            try:
+                return parse_message(self.gmail('messages/' + quote(id, safe=''), {'format':'raw'}), self.store.get('account',''))
+            except ServiceError as error:
+                if error.status == 404: return None
+                raise
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for message in pool.map(fetch, (id for id in ids if id not in cached)):
+                if message is not None: self.store.save(message)
     def classify_message(self, m, config):
         content = {k: m[k] for k in ('sender', 'email', 'mailbox', 'subject', 'body', 'headers', 'complete')}
         payload = {
@@ -447,7 +470,7 @@ class MailService:
             except ServiceError as error:
                 if attempt == 1 or error.status in (400, 401, 402): raise
                 time.sleep(.5)
-    def classify_pending(self):
+    def classify_pending(self, ids=None):
         with self.filter_lock:
             if not self.store.get('filter_enabled', True): return
             generation = self.generation
@@ -455,7 +478,8 @@ class MailService:
         config = private_config(self.store.directory)
         config['prompt'] = filter_prompt()
         pending = [(m, self.content_key(m, config['prompt'], config['model'])) for m, a, d, c in sorted(self.store.rows(), key=lambda r: r[0]['received'], reverse=True)
-                   if 'INBOX' in m['labels'] and c != self.content_key(m, config['prompt'], config['model'])]
+                   if 'INBOX' in m['labels'] and (ids is None or m['id'] in ids)
+                   and c != self.content_key(m, config['prompt'], config['model'])]
         self.progress = {'done': 0, 'total': len(pending)}
         failed = 0
         def classify(item):
@@ -484,12 +508,16 @@ class MailService:
         finally:
             self.classifying = False
             self.retry_at = time.time() + 60 if failed else 0
-    def start(self, more=False, retry=False, classification_only=False):
+    def start(self, more=False, retry=False, classification_only=False, recent_ids=None):
         if not self.store.get('account'): return self.snapshot()
         if not self.job_lock.acquire(blocking=False): return self.snapshot()
         self.busy = True
         def work():
             try:
+                if recent_ids is not None:
+                    self.fetch_recent(recent_ids)
+                    if retry or time.time() >= self.retry_at:
+                        self.classify_pending(ids=set(recent_ids))
                 config = private_config(self.store.directory)
                 signature = hashlib.sha256(config['key'].encode()).hexdigest()
                 if config['key'] and (retry or signature != self.key_signature):

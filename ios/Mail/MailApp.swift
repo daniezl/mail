@@ -11,9 +11,6 @@ import UserNotifications
                 if store.signedIn { InboxView() } else { LoginView() }
             }
             .environmentObject(store)
-            .task {
-                if store.signedIn { await store.refresh() }
-            }
             .task(id: store.signedIn) {
                 guard store.signedIn else { return }
                 await push.prepare(api: store.api)
@@ -23,12 +20,13 @@ import UserNotifications
                 if store.signedIn { await push.prepare(api: store.api) }
             }
             .onChange(of: push.pendingMessage) { _, _ in openNotification() }
-            .task(id: phase) {
-                guard phase == .active else { return }
+            .task(id: "\(phase == .active)-\(store.signedIn)") {
+                guard phase == .active, store.signedIn else { return }
+                await store.refresh(sync:true,announce:true)
                 while !Task.isCancelled {
+                    do { try await Task.sleep(for:.seconds(30)) } catch { return }
                     await store.refresh()
                     await push.prepare(api: store.api)
-                    do { try await Task.sleep(for:.seconds(30)) } catch { return }
                 }
             }
         }

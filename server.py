@@ -125,6 +125,7 @@ class Handler(BaseHTTPRequestHandler):
                           'code_challenge_method': 'S256'}
                 return self.send(200, {'url': 'https://accounts.google.com/o/oauth2/v2/auth?' + urlencode(params)})
             if path == '/api/sync': return self.send(200, SERVICE.start(bool(data.get('more')), bool(data.get('retry'))))
+            if path == '/api/check': return self.send(200, SERVICE.check_inbox())
             if path == '/api/filter/reset': return self.send(200, SERVICE.reset_filter())
             if path == '/api/filter/run': return self.send(200, SERVICE.run_filter(data.get('prompt')))
             if path == '/api/filter/expected': return self.send(200, SERVICE.set_expected(data.get('id', ''), data.get('keep')))

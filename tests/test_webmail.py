@@ -218,6 +218,36 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(requests.call_count,3)
         self.assertEqual(set(self.s.store.message('a')['labels']),{'INBOX','STARRED'})
 
+    def test_quick_check_only_lists_recent_ids_even_while_syncing(self):
+        self.s.store.set('account','reader@example.com')
+        self.s.busy=True
+        with patch.object(self.s,'gmail',return_value={'messages':[{'id':'b'},{'id':'a'}], 'nextPageToken':'older'}) as gmail, \
+             patch.object(self.s,'start') as start:
+            self.assertEqual(self.s.check_inbox(),{'ids':['b','a']})
+        gmail.assert_called_once_with('messages',{'q':'in:inbox','maxResults':100})
+        start.assert_called_once_with(recent_ids=['b','a'])
+
+    def test_quick_check_failure_does_not_report_empty_inbox(self):
+        self.s.store.set('account','reader@example.com')
+        with patch.object(self.s,'gmail',side_effect=ServiceError('Offline')), patch.object(self.s,'start') as start:
+            with self.assertRaises(ServiceError): self.s.check_inbox()
+        start.assert_not_called()
+
+    def test_fast_fetch_reuses_cached_mail(self):
+        raw=EmailMessage();raw['From']='A <a@example.com>';raw.set_content('New mail')
+        with patch.object(self.s,'gmail',return_value=resource(raw,'b')) as gmail:
+            self.s.fetch_recent(['a','b'])
+        gmail.assert_called_once_with('messages/b',{'format':'raw'})
+        self.assertEqual({m['id'] for m,a,d,c in self.s.store.rows()},{'a','b'})
+
+    def test_fast_classification_leaves_unrelated_mail_for_background(self):
+        self.s.store.save(fixture(id='b'))
+        with patch('webmail.service.private_config',return_value={'key':'test','model':'test'}), \
+             patch.object(self.s,'classify_message',return_value='keep') as classify:
+            self.s.classify_pending(ids={'b'})
+        self.assertEqual(classify.call_count,1)
+        self.assertEqual({m['id']:d for m,a,d,c in self.s.store.rows()},{'a':None,'b':'keep'})
+
     def test_read_is_local_and_persistent(self):
         with patch.object(self.s,'gmail') as gmail:
             self.assertFalse(self.s.read('a')['unread']);gmail.assert_not_called()

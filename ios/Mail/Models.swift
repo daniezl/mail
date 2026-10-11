@@ -39,6 +39,8 @@ struct Attachment: Codable, Identifiable, Hashable {
     let inline: Bool
 }
 struct MailSnapshot: Codable {
+    let busy: Bool?
+    let needsLogin: Bool?
     let lastSyncedAt: Double?
     let messages: [MailMessage]
     let csrf: String
