@@ -13,6 +13,7 @@
 		8F3E6B802A34B71B04F5D0C7 /* MailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 758BFD26B4D87096853774B8 /* MailStore.swift */; };
 		CFD720F621B6BE197BA3FA35 /* ReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B103F9F351BE1F5EE0D42AD4 /* ReaderView.swift */; };
 		E5B4A566B752FD67278368FA /* MailApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A911E83E8A56C6FA5470B584 /* MailApp.swift */; };
+		C1EA0A5D6B2F4E8A9D3C7B10 /* CleanupAnimation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1EA0A5D6B2F4E8A9D3C7B11 /* CleanupAnimation.swift */; };
 		F8C3BDE7CC23D0DE03D9C25C /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 927F1F87FBA3B67DB33C0800 /* InboxView.swift */; };
 /* End PBXBuildFile section */
 
@@ -21,6 +22,7 @@
 		38A007151ABE87CC01A5B6E9 /* Mail.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = Mail.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		758BFD26B4D87096853774B8 /* MailStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailStore.swift; sourceTree = "<group>"; };
 		8BF4A28E43F6CF370D3EE1C2 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		C1EA0A5D6B2F4E8A9D3C7B11 /* CleanupAnimation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CleanupAnimation.swift; sourceTree = "<group>"; };
 		927F1F87FBA3B67DB33C0800 /* InboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxView.swift; sourceTree = "<group>"; };
 		A911E83E8A56C6FA5470B584 /* MailApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MailApp.swift; sourceTree = "<group>"; };
 		B103F9F351BE1F5EE0D42AD4 /* ReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderView.swift; sourceTree = "<group>"; };
@@ -47,6 +49,7 @@
 				B103F9F351BE1F5EE0D42AD4 /* ReaderView.swift */,
 				8BF4A28E43F6CF370D3EE1C2 /* Models.swift */,
 				927F1F87FBA3B67DB33C0800 /* InboxView.swift */,
+				C1EA0A5D6B2F4E8A9D3C7B11 /* CleanupAnimation.swift */,
 				F97F0A2C270C2C6857ED8C8A /* API.swift */,
 			);
 			path = Mail;
@@ -142,6 +145,7 @@
 				CFD720F621B6BE197BA3FA35 /* ReaderView.swift in Sources */,
 				487C502A5481E87001E8CC43 /* Models.swift in Sources */,
 				F8C3BDE7CC23D0DE03D9C25C /* InboxView.swift in Sources */,
+				C1EA0A5D6B2F4E8A9D3C7B10 /* CleanupAnimation.swift in Sources */,
 				4E0F9D679C675784E3C32A49 /* API.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

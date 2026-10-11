@@ -14,6 +14,7 @@ import SwiftUI
     @Published var path: [String] = []
     @Published var ownAddresses: [String] = []
     @Published var starring: Set<String> = []
+    private var seenPending: Set<String> = []
     private var searchVersion = 0
     private let cache = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("mail-cache.json")
     init() {
@@ -95,6 +96,28 @@ import SwiftUI
             self.error = error.localizedDescription
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
+    }
+    func markSeen(_ ids: [String]) async {
+        let ids = ids.filter { seenPending.insert($0).inserted }
+        guard !ids.isEmpty else { return }
+        defer { seenPending.subtract(ids) }
+        do {
+            for start in stride(from:0,to:ids.count,by:500) {
+                _ = try await api.request("/api/seen",body:["ids":Array(ids[start..<min(start + 500,ids.count)])])
+            }
+            let marked = Set(ids)
+            for i in messages.indices where marked.contains(messages[i].id) { messages[i].seen = true }
+            if let data = try? JSONEncoder().encode(messages) {
+                try? data.write(to:cache,options:[.atomic,.completeFileProtection])
+            }
+        } catch {
+            // Still unseen on the server; the next launch replays the arrival.
+        }
+    }
+    /// Local only: lets the inbox play the arrival animation again for preview.
+    func replayArrival(_ ids: [String]) {
+        let replay = Set(ids)
+        for i in messages.indices where replay.contains(messages[i].id) { messages[i].seen = false }
     }
     func read(_ id: String) async {
         do {

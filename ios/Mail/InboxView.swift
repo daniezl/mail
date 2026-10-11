@@ -21,10 +21,38 @@ struct LoginView: View {
 struct InboxView: View {
     @EnvironmentObject var store: MailStore
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("showFiltered") private var showFiltered = false
+    @AppStorage("cleanupStyle") private var cleanupStyle = CleanupStyle.swipe
+    /// Unseen hidden mail that already flew into the filter button this session.
+    @State private var cleaned: Set<String> = []
+    @State private var flights: [CleanupFlight] = []
+    @State private var cleaning = false
+    @State private var landings = 0
+    @State private var cleanup = CleanupCoordinator()
     var displayed: [MailMessage] {
         if !store.submittedSearch.isEmpty { return store.searchResults }
-        return store.messages.filter { showFiltered || $0.starred == true || $0.expectedKeep || ["keep", "uncertain"].contains($0.decision ?? "") }
+        return store.messages.filter {
+            showFiltered || $0.starred == true || $0.expectedKeep || ["keep", "uncertain"].contains($0.decision ?? "")
+                || (Self.awaitsCleanup($0) && !cleaned.contains($0.id))
+        }
+    }
+    /// Hidden mail nobody has seen yet briefly appears, then is cleaned up.
+    private static func awaitsCleanup(_ message: MailMessage) -> Bool {
+        message.seen == false && message.decision == "hide" && message.starred != true && !message.expectedKeep
+    }
+    private struct ArrivalContext: Equatable {
+        let unseen: [String]
+        let reading: Bool
+        let searching: Bool
+        let active: Bool
+        let showFiltered: Bool
+    }
+    private var arrivalContext: ArrivalContext {
+        ArrivalContext(unseen:store.messages.filter { $0.seen == false && $0.decision != nil }.map(\.id),
+                       reading:!store.path.isEmpty,searching:!store.submittedSearch.isEmpty,
+                       active:phase == .active,showFiltered:showFiltered)
     }
     private func rowBackground(_ message: MailMessage) -> Color {
         if message.starred == true { return .blue.opacity(colorScheme == .dark ? 0.25 : 0.14) }
@@ -41,6 +69,8 @@ struct InboxView: View {
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
                         .id(message.id)
+                        .onGeometryChange(for:CGRect.self) { $0.frame(in:.global) } action: { cleanup.rows[message.id] = $0 }
+                        .onDisappear { cleanup.rows[message.id] = nil }
                 }
                 if store.searching { ProgressView().frame(maxWidth:.infinity) }
                 if store.nextPage != nil && !store.submittedSearch.isEmpty {
@@ -80,6 +110,64 @@ struct InboxView: View {
             .navigationDestination(for:String.self) { ReaderView(messageID:$0) }
             }
         }
+        .overlay {
+            ZStack {
+                ForEach(flights) { flight in
+                    CleanupFlightView(flight:flight) { land(flight) }
+                }
+            }
+            .frame(maxWidth:.infinity,maxHeight:.infinity)
+            .onGeometryChange(for:CGRect.self) { $0.frame(in:.global) } action: { cleanup.overlay = $0 }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+        }
+        .onChange(of:arrivalContext,initial:true) { _,_ in processArrivals() }
+    }
+    private func processArrivals() {
+        guard phase == .active, store.path.isEmpty, store.submittedSearch.isEmpty, !cleaning else { return }
+        let unseen = store.messages.filter { $0.seen == false && $0.decision != nil && !cleaned.contains($0.id) }
+        let arriving = showFiltered ? [] : unseen.filter(Self.awaitsCleanup)
+        let shown = unseen.filter { showFiltered || !Self.awaitsCleanup($0) }.map(\.id)
+        if !shown.isEmpty { Task { await store.markSeen(shown) } }
+        guard !arriving.isEmpty else { return }
+        cleaning = true
+        Task {
+            await clean(arriving)
+            cleaning = false
+            processArrivals()
+        }
+    }
+    private func clean(_ messages: [MailMessage]) async {
+        do { try await Task.sleep(for:.seconds(CleanupTiming.settle)) } catch { return }
+        // Leave them in place if the inbox went out of view; the next visit retries.
+        guard phase == .active, store.path.isEmpty, store.submittedSearch.isEmpty, !showFiltered else { return }
+        cleanup.prepare()
+        if reduceMotion {
+            withAnimation(.easeOut(duration:0.25)) { cleaned.formUnion(messages.map(\.id)) }
+            landings += 1
+            cleanup.land()
+        } else {
+            let style = cleanupStyle
+            let gap = messages.count > 1 ? CleanupTiming.window / Double(messages.count - 1) : 0
+            for (index, message) in messages.enumerated() {
+                if index > 0 { try? await Task.sleep(for:.seconds(gap)) }
+                flights.append(CleanupFlight(message:message,start:cleanup.start(for:message.id),target:cleanup.target(),
+                                             bounds:cleanup.overlay.size,style:style))
+                withAnimation(.snappy(duration:0.35)) { _ = cleaned.insert(message.id) }
+            }
+            try? await Task.sleep(for:.seconds(style.duration))
+        }
+        await store.markSeen(messages.map(\.id))
+    }
+    private func land(_ flight: CleanupFlight) {
+        flights.removeAll { $0.id == flight.id }
+        landings += 1
+        cleanup.land()
+    }
+    private func previewCleanup() {
+        let ids = store.messages.filter { $0.decision == "hide" && $0.starred != true && !$0.expectedKeep }.prefix(4).map(\.id)
+        cleaned.subtract(ids)
+        store.replayArrival(ids)
     }
     private func syncStatus(at date: Date) -> String {
         guard let timestamp = store.lastSyncedAt else { return "Not synced yet" }
@@ -90,12 +178,20 @@ struct InboxView: View {
         return "Synced \(seconds / 86400)d ago"
     }
     private var filteredButton: some View {
-        Button {
-            UISelectionFeedbackGenerator().selectionChanged()
-            showFiltered.toggle()
+        // Long press picks the cleanup animation and can replay it on recent hidden mail.
+        Menu {
+            Picker("Cleanup animation",selection:$cleanupStyle) {
+                ForEach(CleanupStyle.allCases) { Text($0.title).tag($0) }
+            }
+            Button("Preview cleanup",systemImage:"play",action:previewCleanup).disabled(showFiltered || cleaning)
         } label: {
             Image(systemName:"line.3.horizontal.decrease")
                 .foregroundStyle(showFiltered ? Color.blue : Color.primary)
+                .symbolEffect(.bounce,value:landings)
+                .onGeometryChange(for:CGRect.self) { $0.frame(in:.global) } action: { cleanup.button = $0 }
+        } primaryAction: {
+            UISelectionFeedbackGenerator().selectionChanged()
+            showFiltered.toggle()
         }
         .accessibilityLabel("Show filtered")
         .accessibilityValue(showFiltered ? "On" : "Off")

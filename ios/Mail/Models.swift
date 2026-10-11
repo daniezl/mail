@@ -13,6 +13,7 @@ struct MailMessage: Codable, Identifiable, Hashable {
     var starred: Bool?
     var expectedKeep: Bool
     var decision: String?
+    var seen: Bool?
     var otp: OTP?
     var body: String?
     var html: String?
