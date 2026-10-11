@@ -1,0 +1,9 @@
+mail.example.com {
+    # Caddy 2.6 uses basicauth; configure a bcrypt hash, never a plaintext password.
+    basicauth {
+        your-user REPLACE_WITH_BCRYPT_HASH
+    }
+    reverse_proxy 127.0.0.1:5173 {
+        header_up X-Mail-Proxy-Secret REPLACE_WITH_RANDOM_PROXY_SECRET
+    }
+}

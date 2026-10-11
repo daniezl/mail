@@ -65,3 +65,5 @@ body.reading .inbox{display:none}body.reading .reader{display:block}
 #back:hover{background:var(--hover)}
 @media(max-width:950px){body.reading #message{margin-left:56px;padding-left:24px;padding-right:24px}#back{left:8px}}
 @media(max-width:620px){#back{top:80px}body.reading #message{margin-left:48px;padding-left:12px;padding-right:20px}}
+
+.mail-row.starred { background: rgba(55, 135, 245, .17); }

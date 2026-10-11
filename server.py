@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run: python3 server.py. Deliberately loopback-only, not a public hosting server."""
+"""Run: python3 server.py. Loopback server; hosted mode requires an authenticated reverse proxy."""
 import base64
 import hashlib
 from http.cookies import SimpleCookie
@@ -15,11 +15,17 @@ from webmail.attachments import preview_kind, pdf_page
 
 ROOT = Path(__file__).resolve().parent
 PORT = int(os.environ.get('MAIL_PORT', '5173'))
-ORIGIN = 'http://127.0.0.1:' + str(PORT)
+ORIGIN = os.environ.get('MAIL_PUBLIC_ORIGIN', 'http://127.0.0.1:' + str(PORT)).rstrip('/')
+PUBLIC = 'MAIL_PUBLIC_ORIGIN' in os.environ
+PROXY_SECRET = os.environ.get('MAIL_PROXY_SECRET', '')
+if PUBLIC and (urlsplit(ORIGIN).scheme != 'https' or not urlsplit(ORIGIN).netloc or urlsplit(ORIGIN).path or len(PROXY_SECRET) < 32):
+    raise RuntimeError('Hosted mode requires an HTTPS origin and a strong proxy secret.')
+HOST = urlsplit(ORIGIN).netloc
 SESSION = secrets.token_urlsafe(32)
 CSRF = secrets.token_urlsafe(32)
 STATES = {}
 SERVICE = None
+PUSH = None
 STATIC = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/styles.css': ('styles.css', 'text/css')}
 
 
@@ -43,8 +49,12 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in (headers or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(data)
     def redirect(self, url): self.send(303, b'', headers={'Location': url})
+    def transport_guard(self):
+        if self.headers.get('Host') != HOST: raise ServiceError('Invalid host.', 403)
+        if PUBLIC and not secrets.compare_digest(self.headers.get('X-Mail-Proxy-Secret', ''), PROXY_SECRET):
+            raise ServiceError('Authentication required.', 401)
     def guard(self, write=False):
-        if self.headers.get('Host') != '127.0.0.1:' + str(PORT): raise ServiceError('Invalid host.', 403)
+        self.transport_guard()
         if self.headers.get('Sec-Fetch-Site') == 'cross-site' and urlsplit(self.path).path != '/auth/callback': raise ServiceError('Cross-site request blocked.', 403)
         if not secrets.compare_digest(self.cookie(), SESSION): raise ServiceError('Reload the app to continue.', 401)
         if write and (self.headers.get('Origin') != ORIGIN or not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), CSRF)):
@@ -52,11 +62,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             url = urlsplit(self.path); path = url.path; query = parse_qs(url.query)
-            if self.headers.get('Host') != '127.0.0.1:' + str(PORT): raise ServiceError('Open ' + ORIGIN, 403)
+            self.transport_guard()
             if path in STATIC:
                 if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not (path == '/' and self.headers.get('Sec-Fetch-Dest') == 'document'): raise ServiceError('Cross-site request blocked.', 403)
                 file, mime = STATIC[path]
-                return self.send(200, (ROOT / file).read_bytes(), mime, {'Set-Cookie': 'mail_session=' + SESSION + '; HttpOnly; SameSite=Lax; Path=/'} if path == '/' else None)
+                return self.send(200, (ROOT / file).read_bytes(), mime, {'Set-Cookie': 'mail_session=' + SESSION + '; HttpOnly; SameSite=Lax; Path=/' + ('; Secure' if PUBLIC else '')} if path == '/' else None)
             self.guard()
             if path == '/api/state': return self.send(200, {**SERVICE.snapshot(), 'csrf': CSRF})
             if path == '/api/message':
@@ -95,6 +105,11 @@ class Handler(BaseHTTPRequestHandler):
             if length > 65536: raise ServiceError('Request too large.', 413)
             data = json.loads(self.rfile.read(length) or b'{}')
             path = urlsplit(self.path).path
+            if path == '/api/push/register':
+                return self.send(200, PUSH.register(data.get('token'), data.get('environment')))
+            if path == '/api/push/unregister':
+                PUSH.unregister(data.get('token', ''))
+                return self.send(200, {'ok': True})
             if path == '/api/connect':
                 config = SERVICE.config()
                 if not config: raise ServiceError('Gmail connection is not ready. Please try again shortly.', 503)
@@ -115,6 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/filter/expected': return self.send(200, SERVICE.set_expected(data.get('id', ''), data.get('keep')))
             if path == '/api/search': return self.send(200, SERVICE.search(data.get('query'), data.get('page')))
             if path == '/api/replies': return self.send(200, SERVICE.followups(data.get('id', '')))
+            if path == '/api/star': return self.send(200, SERVICE.star(data.get('id'), data.get('starred')))
             if path == '/api/read': return self.send(200, SERVICE.read(data.get('id', '')))
             raise ServiceError('Not found.', 404)
         except (ValueError, TypeError): self.send(400, {'error': 'Invalid request.'})
@@ -123,9 +139,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global SERVICE
+    global SERVICE, PUSH
     os.umask(0o077)
     SERVICE = MailService(os.environ.get('MAIL_DATA_DIR', ROOT / '.local'), ORIGIN)
+    from webmail.push import PushService, start_background
+    PUSH = PushService(SERVICE)
+    if os.environ.get('MAIL_BACKGROUND_SYNC') == '1':
+        start_background(SERVICE, PUSH)
     print('Mail is running at ' + ORIGIN, flush=True)
     ThreadingHTTPServer(('127.0.0.1', PORT), Handler).serve_forever()
 

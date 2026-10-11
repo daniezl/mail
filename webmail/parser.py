@@ -8,6 +8,7 @@ from html import escape
 from html.parser import HTMLParser
 import re
 from .conversation import conversation, clean_notice
+from .sources import ROUTING_HEADERS
 
 PARSER_VERSION = 3
 
@@ -137,6 +138,7 @@ def parse_message(resource, account):
                'body': body, 'html': safe_html(source_html, images), 'labels': resource.get('labelIds', []),
                'attachments': attachments, 'complete': bool(body) and '\ufffd' not in body,
                'headers': {k: headers[k] for k in ('to', 'cc', 'list-id', 'list-unsubscribe', 'precedence', 'in-reply-to') if k in headers}}
+    message['deliveryHeaders'] = {key: [str(v) for v in root.get_all(key, [])] for key in ROUTING_HEADERS}
     message['conversation'] = conversation(body, message['html'], headers, forwarded)
     message['body'] = clean_notice(body)
     message['otp'] = extract_otp(message)

@@ -27,7 +27,7 @@ Filtering changes what you see in Mail. It does not archive, delete, or relabel 
 - **Persistent local cache.** Keep the latest 100 inbox messages, plus messages ever marked keep manually or by AI. Those retained copies survive filter resets and reclassification.
 - **Offline reading.** Read cached messages without an internet connection while the local server is running.
 
-Mail currently focuses on reading and filtering. Sending, replying, and background push notifications are not implemented.
+Mail currently focuses on reading and filtering. Sending and replying are not implemented. The iOS client supports notifications when server-side APNs credentials are configured.
 
 ## Get started
 
@@ -68,7 +68,7 @@ Then restrict access to both files:
 chmod 600 .local/google.json .local/personal.json
 ```
 
-Alternatively, set `MAIL_ALLOWED_ACCOUNT` in the server’s environment. Mail requests only the `gmail.readonly` scope.
+Alternatively, set `MAIL_ALLOWED_ACCOUNT` in the server’s environment. Mail requests `gmail.modify` to synchronize Gmail stars. Existing read-only connections must reconnect to enable starring. Reading remains local; filtering does not modify Gmail labels. Starred mail stays visible and cached without changing list order.
 
 ### 3. Configure Jev
 
@@ -112,7 +112,7 @@ The count measures agreement with your current checkboxes, not accuracy on an in
 
 ## Data and privacy
 
-The server listens only on `127.0.0.1`. It is intended to run on your computer, not as a publicly hosted service.
+The server listens only on `127.0.0.1`. Hosted deployments must place an authenticated HTTPS reverse proxy in front of it; never expose port 5173 directly.
 
 - **Local storage:** OAuth credentials, API keys, cached mail, labels, and personal rules stay in the ignored `.local/` directory. Files use owner-only permissions but are not separately encrypted.
 - **AI processing:** Necessary email headers and body text are sent to TypeSafe for classification. Attachments are excluded. Recognized verification codes are handled locally.
@@ -142,3 +142,17 @@ node --check app.js
 Node.js is only needed for the JavaScript syntax check. Tests cover parsing, sanitization, classification validation and fallback, read state, cache retention, filter resets, OAuth scope, and request guards.
 
 Attachment previews are rendered locally. Images use large thumbnails; PDFs show the first page and support page navigation in the expanded preview. Inline images already present in the message are omitted from the attachment list. Unsupported files remain downloadable. PDF previews require PyMuPDF from `requirements.txt`.
+
+## Hosted deployment
+
+Templates are in `deploy/`. Run Mail as the dedicated `mailapp` system user under systemd, with Caddy terminating HTTPS and requiring authentication on **every** route. Set `MAIL_PUBLIC_ORIGIN` to the exact HTTPS URL and `MAIL_PROXY_SECRET` to a random secret of at least 32 characters. Caddy must overwrite `X-Mail-Proxy-Secret` with that same value after authentication. Hosted mode rejects requests without it and uses Secure cookies. Keep the environment file and proxy configuration private.
+
+Create a DNS record pointing the chosen hostname to the server, and add `https://YOUR_HOST/auth/callback` to the Google Web OAuth client's authorized redirect URIs. Copy only the needed private configuration and a consistent SQLite backup over SSH; never include the SSH private key. Preserve the prompt and classification cache to avoid unnecessary reclassification. Server backups may contain mail and credentials.
+
+The website login is separate from Gmail authorization. This setup is for a single owner; it does not provide separate mailboxes for multiple website users.
+
+## iOS client and notifications
+
+The native client is in [`ios/`](ios/README.md). It connects to the same server and shares mail, classification, preferences and read state with the website. Its interface contains the inbox, reading, search and a Show filtered switch; filter editing and evaluation stay on the web.
+
+Hosted servers can set `MAIL_BACKGROUND_SYNC=1` to sync every 30 seconds without an open browser. APNs setup is documented in the iOS README. Notifications include new keep/uncertain messages and exclude hide; existing history is baselined per device. Apple signing and a real APNs test are required before claiming push works on a phone.

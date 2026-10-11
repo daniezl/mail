@@ -22,9 +22,9 @@ window.addEventListener('blur',clearMailHover);
 document.addEventListener('visibilitychange',clearMailHover);
 
 let searchActive=false, searchMessages=[], searchQuery='', searchNext=null, searchBusy=false, searchError='', searchRun=0, inboxScroll=0;
-let showFiltered=true;
-try{showFiltered=localStorage.getItem('mail-show-filtered')!=='false';}catch{}
-function visibleMessages(){if(searchActive)return searchMessages;return state.messages.filter(m=>showFiltered || (pendingLabels.has(m.id)?pendingLabels.get(m.id):m.expectedKeep) || m.decision!=='hide');}
+let showFiltered=false;
+try{showFiltered=localStorage.getItem('mail-show-filtered')==='true';}catch{}
+function visibleMessages(){if(searchActive)return searchMessages;return state.messages.filter(m=>showFiltered || m.starred || (pendingLabels.has(m.id)?pendingLabels.get(m.id):m.expectedKeep) || ['keep','uncertain'].includes(m.decision));}
 $('#show-filtered').checked=showFiltered;
 $('#show-filtered').onchange=()=>{showFiltered=$('#show-filtered').checked;try{localStorage.setItem('mail-show-filtered',String(showFiltered));}catch{}render();};
 function notice(text, action=null){$('#notice-text').textContent=text;$('#notice').hidden=!text;$('#retry').hidden=!action;retry=action;}
@@ -35,7 +35,7 @@ async function api(path,data){
 function apply(value){if(value.generation!==undefined && value.generation<(state.generation || 0))return;state={...state,...value};if(value.csrf)csrf=value.csrf;render();}
 function dateText(m,full=false){const d=new Date(m.date*1000);return d.toLocaleString('en-US',full?{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}:d.toDateString()===new Date().toDateString()?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric'});}
 function row(m){
-  const wrap=el('div','mail-row'+(selected===m.id?' selected':''));wrap.setAttribute('role','listitem');wrap.dataset.id=m.id;
+  const wrap=el('div','mail-row'+(m.starred?' starred':'')+(selected===m.id?' selected':''));wrap.setAttribute('role','listitem');wrap.dataset.id=m.id;
   const button=el('button','mail-item'+(m.unread?' unread':''));button.setAttribute('aria-label',`${m.unread?'Unread. ':''}${m.sender}. ${m.subject}`);button.setAttribute('aria-pressed',String(selected===m.id));button.dataset.id=m.id;
   const meta=el('span','meta'), accent=el('span','accent');accent.style.setProperty('--source',m.color);accent.title=m.mailbox || 'Unknown source';accent.setAttribute('aria-hidden','true');
   const time=el('time','',dateText(m));time.dateTime=new Date(m.date*1000).toISOString();
@@ -84,7 +84,7 @@ function renderRows(){
 function render(){
   const focused=document.activeElement?.dataset?.id;
   $('#login').hidden=!!state.account;$('#workspace').hidden=!state.account;
-  $('#connection-state').textContent=state.busy?(state.classifying?(state.progress?`Filtering ${state.progress.done} / ${state.progress.total}…`:'Filtering…'):''):'';
+  renderSyncStatus();
   renderRows();
   $('#search-toggle').hidden=!state.account;
   $('#search-form').hidden=!searchActive;
@@ -104,7 +104,7 @@ function render(){
   if(focused && keyboardNavigation){const b=[...document.querySelectorAll('.mail-item')].find(b=>b.dataset.id===focused);b?.focus({preventScroll:true});}
   $('#empty').hidden=visibleMessages().length>0 || (searchActive?searchBusy || !searchQuery || !!searchError:state.busy);
   $('#empty').textContent=searchActive?'No results':state.error?'Mail is temporarily unavailable':'No mail yet';
-  if(state.error)notice(state.error,state.needsLogin?connect:()=>sync(false,true));else if(!requestRunning)notice('');
+
   if(selected && !visibleMessages().some(m=>m.id===selected))closeReader();
 }
 async function markCopiedRead(id){
@@ -270,9 +270,9 @@ $('#retry').onclick=()=>{const fn=retry;notice('');fn?.();};
 async function sync(more=false,force=false){
   if(requestRunning || state.busy || !state.account)return;
   requestRunning=true;
-  try{apply(await api('sync',{more,retry:force}));}catch(e){notice(e.message,()=>sync(more,force));}finally{requestRunning=false;}
+  try{apply(await api('sync',{more,retry:force}));}catch{}finally{requestRunning=false;}
 }
-async function poll(){if(document.hidden || !state.busy)return;try{apply(await api('state'));}catch(e){notice('Connection lost. Please retry.',boot);}}
+async function poll(){if(document.hidden || !state.busy)return;try{apply(await api('state'));}catch{}}
 async function saveExpected(id,keep){
   pendingLabels.set(id,keep);render();
   try{const value=await api('filter/expected',{id,keep});pendingLabels.delete(id);apply(value);}
@@ -292,10 +292,19 @@ function setTheme(value){theme=['system','light','dark'].includes(value)?value:'
 $('#appearance').onclick=()=>setTheme({system:'light',light:'dark',dark:'system'}[theme]);setTheme(theme);
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',updateReaderTheme);
 async function boot(){
-  try{apply(await api('state'));if(state.account)sync();}catch(e){notice('Could not connect to Mail.',boot);}
+  try{apply(await api('state'));if(state.account)sync();}catch{}
   if(new URLSearchParams(location.search).has('demo'))history.replaceState(null,'','/');
   if(new URLSearchParams(location.search).has('login')){notice('Google sign-in did not finish. Please try again.',connect);history.replaceState(null,'','/');}
 }
 setInterval(poll,1500);setInterval(()=>{if(!document.hidden)sync();},30000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(state.busy)poll();else sync();}});
 boot();
+
+function renderSyncStatus(){
+  const t=state.lastSyncedAt;
+  const seconds=Math.max(0,Math.floor(Date.now()/1000-t));
+  const age=seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m`:seconds<86400?`${Math.floor(seconds/3600)}h`:`${Math.floor(seconds/86400)}d`;
+  $('#connection-state').textContent=t?`Synced ${age} ago`:'Not synced yet';
+}
+setInterval(renderSyncStatus,1000);
+renderSyncStatus();

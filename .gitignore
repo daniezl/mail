@@ -4,9 +4,8 @@ __pycache__/
 .DS_Store
 .env
 
-# Personal prompts, legacy native app and local artifacts
+# Personal prompts and local artifacts
 /filter-prompt.txt
-/ios/
 .env.*
 *.sqlite*
 *.db
@@ -19,3 +18,7 @@ GoogleService-Info.plist
 client_secret*.json
 credentials*.json
 **/xcuserdata/
+
+# Native build outputs and APNs credentials
+/ios/build/
+*.p8

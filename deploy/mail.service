@@ -1,0 +1,22 @@
+[Unit]
+Description=Personal Mail
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mailapp
+Group=mailapp
+WorkingDirectory=/opt/mail
+EnvironmentFile=/etc/mail.env
+ExecStart=/opt/mail/venv/bin/python /opt/mail/server.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mail/.local
+
+[Install]
+WantedBy=multi-user.target

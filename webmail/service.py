@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
 from .parser import PARSER_VERSION, parse_message
+from .sources import source_mailbox, ROUTING_HEADERS
 from .attachments import attachment_metadata
 
 MODEL = 'jev-1.13.0'
@@ -29,7 +30,7 @@ def allowed_account(directory):
     except (OSError, ValueError): value = {}
     return (os.environ.get('MAIL_ALLOWED_ACCOUNT') or value.get('allowed_account', '')).strip().lower()
 
-SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
+SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
 
 
 class ServiceError(Exception):
@@ -47,6 +48,12 @@ def request_json(url, data=None, token=None, form=False, method=None, timeout=30
             return json.load(response)
     except HTTPError as e:
         # Never reflect upstream response bodies (which may contain credentials/mail).
+        if e.code in (403, 429):
+            try:
+                reasons = {item.get('reason') for item in json.load(e).get('error', {}).get('errors', [])}
+            except (ValueError, AttributeError, TypeError): reasons = set()
+            if e.code == 429 or reasons & {'rateLimitExceeded', 'userRateLimitExceeded'}:
+                raise ServiceError('Gmail is temporarily rate limiting requests. Retrying shortly.', 429)
         if e.code == 400: raise ServiceError('The service rejected the request.', 400)
         if e.code == 404: raise ServiceError('Mail no longer exists in Gmail.', 404)
         if e.code == 401: raise ServiceError('Authentication expired. Reconnect or update your API key.', 401)
@@ -132,6 +139,10 @@ class MailService:
         self.busy = False; self.sync_error = None; self.needs_login = False
         self.job_lock = threading.Lock()
         self.token_lock = threading.RLock()
+        self.label_lock = threading.RLock()
+        self.label_versions = {}
+        self.sync_retry_at = 0
+        self.sync_backoff = 30
         self.progress = None
         self.key_signature = None
         self.retry_at = 0
@@ -151,8 +162,8 @@ class MailService:
         with self.store.connect() as db:
             db.execute("UPDATE mail SET retained=1 WHERE decision='keep' OR id IN (SELECT substr(key,10) FROM settings WHERE key LIKE 'expected:%' AND value='true')")
             if ids:
-                db.execute('DELETE FROM mail WHERE retained=0 AND id NOT IN (' + ','.join('?' for _ in ids) + ')', ids)
-            else: db.execute('DELETE FROM mail WHERE retained=0')
+                db.execute("DELETE FROM mail WHERE retained=0 AND NOT EXISTS (SELECT 1 FROM json_each(mail.payload, '$.labels') WHERE value='STARRED') AND id NOT IN (" + ','.join('?' for _ in ids) + ')', ids)
+            else: db.execute("DELETE FROM mail WHERE retained=0 AND NOT EXISTS (SELECT 1 FROM json_each(mail.payload, '$.labels') WHERE value='STARRED')")
             db.execute("DELETE FROM settings WHERE key LIKE 'read:%' AND substr(key,6) NOT IN (SELECT id FROM mail)")
             db.execute("DELETE FROM settings WHERE key IN ('next','loaded_more')")
     def reset_filter(self):
@@ -241,13 +252,12 @@ class MailService:
             row = db.execute('SELECT cache_key FROM mail WHERE id=?', (message['id'],)).fetchone()
         if raw and row and row[0] and raw.get('cacheKey') == row[0]:
             result['confidence'] = raw['confidence']; result['probabilities'] = raw['probabilities']; result['modelChoice'] = raw['choice']
+        result['starred'] = 'STARRED' in message.get('labels', [])
         result['expectedKeep'] = self.store.get('expected:' + message['id'], False)
         result['unread'] = 'UNREAD' in message['labels'] and not self.store.get('read:' + message['id'], False)
-        colors = self.store.get('colors', {})
-        mailbox = message['mailbox']
-        if mailbox and mailbox not in colors:
-            colors[mailbox] = ['#569078', '#bc806b', '#a38d56', '#718aad', '#9883a7'][len(colors) % 5]
-            self.store.set('colors', colors)
+        colors = self.store.get('source_colors', {})
+        mailbox = source_mailbox(message, self.store.get('account'), self.store.get('own_addresses', []))
+        result['mailbox'] = mailbox
         result['color'] = colors.get(mailbox, '#959995')
         result['otp'] = message.get('otp')
         if detail:
@@ -264,8 +274,8 @@ class MailService:
         return result
     def status(self):
         return {'account': self.store.get('account'), 'ownAddresses': self.store.get('own_addresses', []), 'busy': self.busy, 'classifying': self.classifying,
-                'error': self.sync_error or self.classify_error, 'needsLogin': self.needs_login,
-                'filterEnabled': self.store.get('filter_enabled', True), 'generation': self.generation, 'progress': self.progress}
+                'error': self.sync_error or self.classify_error, 'needsLogin': self.needs_login, 'canStar': SCOPE in self.store.get('google_tokens', {}).get('scope', '').split(),
+                'lastSyncedAt': self.store.get('last_synced_at'), 'filterEnabled': self.store.get('filter_enabled', True), 'generation': self.generation, 'progress': self.progress}
     def snapshot(self):
         rows = sorted(self.store.rows(), key=lambda r: r[0]['received'], reverse=True)
         evaluated = [(m,d) for m,a,d,c in rows if d is not None]
@@ -313,6 +323,26 @@ class MailService:
         m = self.cached_message(id)
         self.store.set('read:' + id, True)
         return self.public(m, detail=True)
+    def star(self, id, starred):
+        if not isinstance(id, str) or not id or type(starred) is not bool:
+            raise ServiceError('Invalid star request.')
+        with self.label_lock:
+            if SCOPE not in self.store.get('google_tokens', {}).get('scope', '').split():
+                raise ServiceError('Reconnect Gmail on the website to enable stars.', 403)
+            try: message = self.store.message(id)
+            except ServiceError:
+                message = self.search_cache.get(id)
+                if message is None: raise ServiceError('Mail not cached.', 404)
+            result = request_json('https://gmail.googleapis.com/gmail/v1/users/me/messages/' + quote(id, safe='') + '/modify',
+                                  {'addLabelIds': ['STARRED'] if starred else [],
+                                   'removeLabelIds': [] if starred else ['STARRED']},
+                                  token=self.token(), method='POST')
+            message['labels'] = result['labelIds']
+            self.store.save(message)
+            self.label_versions[id] = self.label_versions.get(id, 0) + 1
+            if id in self.search_cache: self.search_cache[id] = message
+            return {'id': id, 'starred': 'STARRED' in message['labels']}
+
     def followups(self, id):
         message=self.cached_message(id)
         cached=self.store.get('thread-replies:'+id, {})
@@ -349,26 +379,55 @@ class MailService:
         content = {k: m[k] for k in ('sender', 'email', 'mailbox', 'subject', 'body', 'headers', 'complete')}
         return hashlib.sha256(json.dumps([content, model or private_config(self.store.directory)['model'], PROMPT_VERSION, prompt if prompt is not None else filter_prompt()], sort_keys=True).encode()).hexdigest()
     def fetch_page(self, page=None):
-        params = {'q': 'in:inbox', 'maxResults': CACHE_LIMIT}
-        listing = self.gmail('messages', params)
-        cached = {m['id']: m for m, a, d, c in self.store.rows()}
-        items = listing.get('messages', [])
-        def fetch(item):
-            id = item['id']
+        # Listing IDs is much cheaper than fetching metadata for every cached mail.
+        # Read complete label sets so old retained messages also reflect Gmail changes.
+        with self.label_lock: versions = dict(self.label_versions)
+        def listing(query):
+            ids = []; params = {'q':query, 'maxResults':500}; seen_pages = set()
+            while True:
+                result = self.gmail('messages', params)
+                ids.extend(item['id'] for item in result.get('messages', []))
+                next_page = result.get('nextPageToken')
+                if not next_page: return list(dict.fromkeys(ids))
+                if next_page in seen_pages: raise ServiceError('Gmail returned a repeated page. Please retry.', 502)
+                seen_pages.add(next_page); params['pageToken'] = next_page
+        inbox_order = listing('in:inbox')
+        starred = set(listing('in:inbox is:starred'))
+        unread = set(listing('in:inbox is:unread'))
+        inbox = set(inbox_order)
+        recent = inbox_order[:CACHE_LIMIT]
+        cached = {m['id']:m for m,a,d,c in self.store.rows()}
+        ids = list(dict.fromkeys([*recent, *sorted(starred), *cached]))
+        def fetch(id):
             if id in cached and cached[id].get('parserVersion') == PARSER_VERSION:
-                result = self.gmail('messages/' + quote(id, safe=''), {'format': 'minimal'})
-                m = cached[id]; m['labels'] = result.get('labelIds', [])
+                m = cached[id]
+                labels = set(m['labels']) - {'INBOX','STARRED','UNREAD'}
+                if id in inbox: labels.add('INBOX')
+                if id in starred: labels.add('STARRED')
+                if id in unread: labels.add('UNREAD')
+                # Keep non-inbox star/unread state until that message is opened.
+                if id not in inbox: labels.update(set(m['labels']) & {'STARRED','UNREAD'})
+                m['labels'] = sorted(labels)
                 return m
-            resource = self.gmail('messages/' + quote(id, safe=''), {'format': 'raw'})
-            return parse_message(resource, self.store.get('account', ''))
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            for m in pool.map(fetch, items): self.store.save(m)
-        ids = [item['id'] for item in items]
-        return ids, listing.get('nextPageToken')
+            try:
+                return parse_message(self.gmail('messages/'+quote(id,safe=''), {'format':'raw'}), self.store.get('account',''))
+            except ServiceError as error:
+                if error.status != 404: raise
+                if id not in cached: return None
+                m = cached[id]; m['labels'] = []; return m
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for m in pool.map(fetch,ids):
+                if m is None: continue
+                with self.label_lock:
+                    if versions.get(m['id'],0) != self.label_versions.get(m['id'],0):
+                        m['labels'] = self.store.message(m['id'])['labels']
+                    self.store.save(m)
+        return recent, None
     def sync(self, more=False):
         with self.sync_lock:
             ids, _ = self.fetch_page()
             self.trim_cache(ids)
+            self.store.set('last_synced_at', time.time())
     def classify_message(self, m, config):
         content = {k: m[k] for k in ('sender', 'email', 'mailbox', 'subject', 'body', 'headers', 'complete')}
         payload = {
@@ -431,7 +490,6 @@ class MailService:
         self.busy = True
         def work():
             try:
-                self.sync_error = None
                 config = private_config(self.store.directory)
                 signature = hashlib.sha256(config['key'].encode()).hexdigest()
                 if config['key'] and (retry or signature != self.key_signature):
@@ -439,10 +497,20 @@ class MailService:
                     self.retry_at = 0
                     self.classify_pending()
                 try:
-                    if not classification_only: self.sync()
+                    if not classification_only and time.time() >= self.sync_retry_at:
+                        self.sync()
+                        self.sync_error = None
+                        self.needs_login = False
+                        self.sync_backoff = 30
+                        self.sync_retry_at = 0
                 except ServiceError as error:
                     self.needs_login = error.status == 401
-                    self.sync_error = 'Reconnect Gmail to continue.' if self.needs_login else 'Could not sync. Cached mail is available.'
+                    if error.status == 429:
+                        self.sync_backoff = min(300, self.sync_backoff * 2)
+                        self.sync_retry_at = time.time() + self.sync_backoff
+                        self.sync_error = 'Gmail is rate limiting requests. Sync will retry automatically.'
+                    else:
+                        self.sync_error = 'Reconnect Gmail to continue.' if self.needs_login else str(error)
                 if retry or time.time() >= self.retry_at: self.classify_pending()
                 else:
                     # A service failure must not leave newly fetched messages invisible.

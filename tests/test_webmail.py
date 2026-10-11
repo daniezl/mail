@@ -154,6 +154,70 @@ class ServiceTests(unittest.TestCase):
             start.assert_called_once_with(retry=True,classification_only=True)
             with self.assertRaises(ServiceError):self.s.run_filter('  ')
             self.assertEqual(prompt.read_text().strip(),'New JSON prompt')
+    def test_star_requires_modify_scope_and_boolean(self):
+        with patch('webmail.service.request_json') as request:
+            with self.assertRaises(ServiceError): self.s.star('a', True)
+            with self.assertRaises(ServiceError): self.s.star('a', 'true')
+            request.assert_not_called()
+        self.assertFalse(self.s.public(self.s.store.message('a'))['starred'])
+    def test_star_sync_preserves_other_labels_and_classification(self):
+        from webmail.service import SCOPE
+        self.s.store.set('google_tokens', {'scope': SCOPE})
+        with self.s.store.connect() as db: db.execute("UPDATE mail SET decision='hide',cache_key='cached' WHERE id='a'")
+        with patch.object(self.s, 'token', return_value='test'), patch('webmail.service.request_json', return_value={'labelIds':['INBOX','UNREAD','STARRED']}) as request:
+            self.assertTrue(self.s.star('a', True)['starred'])
+            self.assertEqual(request.call_args.args[1], {'addLabelIds':['STARRED'],'removeLabelIds':[]})
+        self.assertEqual(self.s.store.rows()[0][2:], ('hide','cached'))
+        self.s.trim_cache([])
+        self.assertTrue(self.s.snapshot()['messages'][0]['starred'])
+        with patch.object(self.s, 'token', return_value='test'), patch('webmail.service.request_json', side_effect=ServiceError('Offline')):
+            with self.assertRaises(ServiceError): self.s.star('a', False)
+        self.assertTrue(self.s.public(self.s.store.message('a'))['starred'])
+        with patch.object(self.s, 'token', return_value='test'), patch('webmail.service.request_json', return_value={'labelIds':['INBOX','UNREAD']}) as request:
+            self.assertFalse(self.s.star('a', False)['starred'])
+            self.assertEqual(request.call_args.args[1], {'addLabelIds':[],'removeLabelIds':['STARRED']})
+        self.s.trim_cache([])
+        self.assertEqual(self.s.store.rows(), [])
+    def test_star_does_not_wait_for_full_sync(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from webmail.service import SCOPE
+        self.s.store.set('google_tokens', {'scope':SCOPE})
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with patch.object(self.s,'token',return_value='test'), patch('webmail.service.request_json',return_value={'labelIds':['INBOX','STARRED']}):
+                with self.s.sync_lock:
+                    result=pool.submit(self.s.star,'a',True).result(timeout=2)
+                self.assertTrue(result['starred'])
+    def test_sync_cannot_overwrite_concurrent_star(self):
+        from webmail.service import SCOPE
+        self.s.store.set('google_tokens', {'scope':SCOPE})
+        def gmail(path,params=None):
+            if path=='messages':
+                if params['q']=='in:inbox is:unread': self.s.star('a',True)
+                return {'messages':[{'id':'a'}]} if params['q']=='in:inbox' else {'messages':[]}
+            self.fail('Cached messages should not fetch metadata')
+        with patch.object(self.s,'gmail',side_effect=gmail), patch.object(self.s,'token',return_value='test'), patch('webmail.service.request_json',return_value={'labelIds':['INBOX','UNREAD','STARRED']}):
+            self.s.sync()
+        self.assertTrue(self.s.public(self.s.store.message('a'))['starred'])
+
+    def test_gmail_starred_mail_outside_cache_window(self):
+        raw=EmailMessage();raw['From']='A <a@example.com>';raw.set_content('Hi')
+        def gmail(path,params=None):
+            if path=='messages':
+                return {'messages':[{'id':'old'}]} if params.get('q')=='in:inbox is:starred' else {'messages':[]}
+            if path=='messages/old': return resource(raw,'old',['INBOX','STARRED'])
+            return resource(raw,'a',['INBOX'])
+        with patch.object(self.s,'gmail',side_effect=gmail): self.s.sync()
+        self.assertEqual([m['id'] for m,a,d,c in self.s.store.rows()], ['old'])
+
+    def test_cached_sync_uses_label_lists_without_message_downloads(self):
+        def gmail(path,params=None):
+            self.assertEqual(path,'messages')
+            return {'messages':[{'id':'a'}]} if params['q'] in ('in:inbox','in:inbox is:starred') else {'messages':[]}
+        with patch.object(self.s,'gmail',side_effect=gmail) as requests:
+            self.s.sync()
+        self.assertEqual(requests.call_count,3)
+        self.assertEqual(set(self.s.store.message('a')['labels']),{'INBOX','STARRED'})
+
     def test_read_is_local_and_persistent(self):
         with patch.object(self.s,'gmail') as gmail:
             self.assertFalse(self.s.read('a')['unread']);gmail.assert_not_called()
@@ -162,7 +226,8 @@ class ServiceTests(unittest.TestCase):
     def test_sync_deduplicates_and_drops_pagination(self):
         raw=EmailMessage();raw['From']='A <a@example.com>';raw.set_content('Hi')
         def gmail(path,params=None):
-            if path=='messages':return {'messages':[{'id':'a'}], 'nextPageToken':'page3' if params.get('pageToken') else 'page2'}
+            if path=='messages' and params.get('q')!='in:inbox':return {'messages':[]}
+            if path=='messages':return {'messages':[{'id':'a'}], **({'nextPageToken':'page2'} if not params.get('pageToken') else {})}
             return resource(raw)
         with patch.object(self.s,'gmail',side_effect=gmail):self.s.sync();self.s.sync(True);self.s.sync()
         self.assertEqual(len(self.s.store.rows()),1);self.assertIsNone(self.s.store.get('next'))
@@ -278,14 +343,24 @@ class ServiceTests(unittest.TestCase):
         with patch.object(self.s,'config',return_value={'client_id':'test','client_secret':'test'}),patch('webmail.service.request_json',side_effect=ServiceError('Expired',400)):
             with self.assertRaises(ServiceError) as error:self.s.token()
             self.assertEqual(error.exception.status,401)
-    def test_only_readonly_scope(self):
+    def test_modify_scope_for_gmail_stars(self):
         from webmail.service import SCOPE
-        self.assertEqual(SCOPE,'https://www.googleapis.com/auth/gmail.readonly')
+        self.assertEqual(SCOPE,'https://www.googleapis.com/auth/gmail.modify')
 
 class SecurityTests(unittest.TestCase):
     def handler(self,**headers):
         import server
         h=object.__new__(server.Handler);h.path='/api/read';h.headers={'Host':'127.0.0.1:'+str(server.PORT),'Cookie':'mail_session='+server.SESSION,'Origin':server.ORIGIN,'X-CSRF-Token':server.CSRF,**headers};return h
+    def test_hosted_requires_proxy_auth(self):
+        import server
+        from unittest.mock import patch
+        with patch.multiple(server, PUBLIC=True, HOST='mail.example.com', PROXY_SECRET='x'*40):
+            with self.assertRaises(ServiceError):
+                self.handler(Host='mail.example.com').transport_guard()
+            self.handler(Host='mail.example.com', **{'X-Mail-Proxy-Secret':'x'*40}).transport_guard()
+            with self.assertRaises(ServiceError):
+                self.handler(Host='evil.example', **{'X-Mail-Proxy-Secret':'x'*40}).transport_guard()
+
     def test_origin_csrf_and_session(self):
         self.handler().guard(write=True)
         for changes in ({'Host':'evil.example'},{'Origin':'https://evil.example'},{'X-CSRF-Token':''},{'Cookie':''},{'Sec-Fetch-Site':'cross-site'}):
